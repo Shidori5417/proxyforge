@@ -3,10 +3,12 @@
 Fast, concurrent proxy checker for **HTTP**, **HTTPS**, **SOCKS4** and **SOCKS5**
 proxies, written in Rust.
 
-[![CI](https://github.com/OWNER/proxyforge/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/proxyforge/actions/workflows/ci.yml)
+[![CI](https://github.com/Shidori5417/proxyforge/actions/workflows/ci.yml/badge.svg)](https://github.com/Shidori5417/proxyforge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Türkçe dokümantasyon: [README.tr.md](README.tr.md)
+
+![proxyforge checking a mixed batch of HTTP, SOCKS4 and SOCKS5 proxies](docs/demo.png)
 
 ## Features
 
@@ -26,7 +28,7 @@ Türkçe dokümantasyon: [README.tr.md](README.tr.md)
 Requires a recent stable Rust toolchain (1.85+).
 
 ```bash
-git clone https://github.com/OWNER/proxyforge.git
+git clone https://github.com/Shidori5417/proxyforge.git
 cd proxyforge
 cargo install --path .
 ```
