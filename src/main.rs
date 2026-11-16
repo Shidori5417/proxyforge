@@ -1,12 +1,3 @@
-mod anonymity;
-mod checker;
-mod cli;
-mod input;
-mod output;
-mod proxy;
-mod report;
-mod transport;
-
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,11 +8,13 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tokio::sync::mpsc;
 
-use crate::checker::CheckSettings;
-use crate::cli::Cli;
-use crate::output::Report;
-use crate::report::CheckResult;
-use crate::transport::{Target, get_direct};
+use proxyforge::anonymity;
+use proxyforge::checker::{self, CheckSettings};
+use proxyforge::cli::Cli;
+use proxyforge::input;
+use proxyforge::output::Report;
+use proxyforge::report::CheckResult;
+use proxyforge::transport::{Target, get_direct};
 
 #[tokio::main]
 async fn main() -> Result<()> {

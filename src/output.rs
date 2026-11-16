@@ -31,7 +31,7 @@ impl Report {
 
         match cli.sort {
             Sort::Latency => visible.sort_by_key(|result| (!result.alive, result.latency_ms())),
-            Sort::Proxy => visible.sort_by(|a, b| a.proxy.redacted().cmp(&b.proxy.redacted())),
+            Sort::Proxy => visible.sort_by_key(|result| result.proxy.redacted()),
             Sort::Status => visible.sort_by_key(|result| !result.alive),
         }
 
