@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 
+use crate::anonymity::AnonymityLevel;
 use crate::proxy::Protocol;
 
 const EXAMPLES: &str = "\
@@ -38,6 +39,18 @@ pub struct Cli {
         default_value = "https://httpbin.org/get"
     )]
     pub judge: String,
+
+    /// Do not classify proxies by anonymity
+    #[arg(long)]
+    pub no_anonymity: bool,
+
+    /// URL used once, without a proxy, to learn the local public IP
+    #[arg(long, value_name = "URL", default_value = "https://api.ipify.org")]
+    pub local_ip_url: String,
+
+    /// Only report proxies at or above this anonymity level
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    pub min_anonymity: Option<AnonymityLevel>,
 
     /// Number of proxies checked in parallel
     #[arg(

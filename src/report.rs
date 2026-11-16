@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use crate::anonymity::AnonymityLevel;
 use crate::proxy::Proxy;
 
 /// Result of probing one proxy endpoint.
@@ -13,6 +14,12 @@ pub struct CheckResult {
     pub latency: Duration,
     /// HTTP status returned by the judge, when a response was received.
     pub status_code: Option<u16>,
+    /// Anonymity level, when the judge echoed enough information.
+    pub anonymity: Option<AnonymityLevel>,
+    /// Public IP the judge observed for this proxy.
+    pub exit_ip: Option<String>,
+    /// Forwarding headers the judge could see.
+    pub leaks: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -23,6 +30,9 @@ impl CheckResult {
             alive: true,
             latency,
             status_code,
+            anonymity: None,
+            exit_ip: None,
+            leaks: Vec::new(),
             error: None,
         }
     }
@@ -33,6 +43,9 @@ impl CheckResult {
             alive: false,
             latency,
             status_code: None,
+            anonymity: None,
+            exit_ip: None,
+            leaks: Vec::new(),
             error: Some(error.into()),
         }
     }

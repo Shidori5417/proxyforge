@@ -164,12 +164,19 @@ pub async fn get(
     target: &Target,
     timeout: Duration,
 ) -> Result<Response, TransportError> {
-    timeout_fut(timeout, get_inner(proxy, target))
+    timeout_fut(timeout, get_inner(Some(proxy), target))
         .await
         .map_err(|_| TransportError::Timeout(timeout))?
 }
 
-async fn get_inner(proxy: &Proxy, target: &Target) -> Result<Response, TransportError> {
+/// Sends a `GET` request straight to `target`, without a proxy.
+pub async fn get_direct(target: &Target, timeout: Duration) -> Result<Response, TransportError> {
+    timeout_fut(timeout, get_inner(None, target))
+        .await
+        .map_err(|_| TransportError::Timeout(timeout))?
+}
+
+async fn get_inner(proxy: Option<&Proxy>, target: &Target) -> Result<Response, TransportError> {
     let mut stream = open_stream(proxy, target).await?;
     let request = build_request(proxy, target);
     stream.write_all(request.as_bytes()).await?;
@@ -179,21 +186,28 @@ async fn get_inner(proxy: &Proxy, target: &Target) -> Result<Response, Transport
 
 /// Connects to the proxy, performs its handshake and returns a stream that
 /// reaches the target.
-async fn open_stream(proxy: &Proxy, target: &Target) -> Result<BoxStream, TransportError> {
-    let tcp = TcpStream::connect((proxy.host.as_str(), proxy.port))
+async fn open_stream(proxy: Option<&Proxy>, target: &Target) -> Result<BoxStream, TransportError> {
+    let (host, port) = match proxy {
+        Some(proxy) => (proxy.host.as_str(), proxy.port),
+        None => (target.host.as_str(), target.port),
+    };
+
+    let tcp = TcpStream::connect((host, port))
         .await
-        .map_err(|err| TransportError::Connect(err.to_string()))?;
+        .map_err(|err| TransportError::Connect(format!("{host}:{port}: {err}")))?;
     let _ = tcp.set_nodelay(true);
     let mut stream: BoxStream = Box::new(tcp);
 
-    if proxy.protocol.is_tls() {
-        stream = Box::new(tls_wrap(&proxy.host, stream).await?);
-    }
+    if let Some(proxy) = proxy {
+        if proxy.protocol.is_tls() {
+            stream = Box::new(tls_wrap(&proxy.host, stream).await?);
+        }
 
-    if proxy.protocol.is_socks() {
-        socks_handshake(stream.as_mut(), proxy, target).await?;
-    } else if target.tls {
-        http_connect(stream.as_mut(), proxy, target).await?;
+        if proxy.protocol.is_socks() {
+            socks_handshake(stream.as_mut(), proxy, target).await?;
+        } else if target.tls {
+            http_connect(stream.as_mut(), proxy, target).await?;
+        }
     }
 
     if target.tls {
@@ -231,10 +245,10 @@ async fn tls_wrap(
         .map_err(|err| TransportError::Tls(err.to_string()))
 }
 
-fn build_request(proxy: &Proxy, target: &Target) -> String {
+fn build_request(proxy: Option<&Proxy>, target: &Target) -> String {
     // Plain HTTP targets are requested in absolute form through HTTP proxies;
     // everything else travels inside a CONNECT tunnel or a SOCKS connection.
-    let absolute = !proxy.protocol.is_socks() && !target.tls;
+    let absolute = proxy.is_some_and(|proxy| !proxy.protocol.is_socks()) && !target.tls;
     let uri = if absolute {
         target.absolute_uri()
     } else {
@@ -246,7 +260,10 @@ fn build_request(proxy: &Proxy, target: &Target) -> String {
         target.host_header()
     );
 
-    if absolute && let Some(user) = &proxy.username {
+    if absolute
+        && let Some(proxy) = proxy
+        && let Some(user) = &proxy.username
+    {
         let password = proxy.password.as_deref().unwrap_or("");
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
         request.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
@@ -836,7 +853,7 @@ mod tests {
     fn builds_absolute_uri_for_plain_http_proxies() {
         let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
         let target = Target::parse("http://example.com/hello").unwrap();
-        let request = build_request(&proxy, &target);
+        let request = build_request(Some(&proxy), &target);
         assert!(request.starts_with("GET http://example.com/hello HTTP/1.1\r\n"));
         assert!(!request.contains("Proxy-Authorization"));
     }
@@ -845,7 +862,7 @@ mod tests {
     fn uses_origin_form_inside_tunnels() {
         let proxy = Proxy::new(crate::proxy::Protocol::Socks5, "10.0.0.1", 1080);
         let target = Target::parse("https://example.com/hello").unwrap();
-        let request = build_request(&proxy, &target);
+        let request = build_request(Some(&proxy), &target);
         assert!(request.starts_with("GET /hello HTTP/1.1\r\n"));
     }
 
@@ -854,7 +871,7 @@ mod tests {
         let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128)
             .with_credentials("user", Some("pass".into()));
         let target = Target::parse("http://example.com/").unwrap();
-        let request = build_request(&proxy, &target);
+        let request = build_request(Some(&proxy), &target);
         assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
     }
 }

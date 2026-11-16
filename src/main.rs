@@ -1,3 +1,4 @@
+mod anonymity;
 mod checker;
 mod cli;
 mod input;
@@ -46,10 +47,24 @@ async fn run(cli: Cli) -> Result<()> {
 
     let target =
         Target::parse(&cli.judge).with_context(|| format!("invalid judge URL `{}`", cli.judge))?;
+
+    let local_ip = if cli.no_anonymity {
+        None
+    } else {
+        resolve_local_ip(&cli).await
+    };
+    if let Some(ip) = &local_ip
+        && !cli.quiet
+    {
+        eprintln!("local IP: {ip}");
+    }
+
     let settings = Arc::new(CheckSettings {
         target,
         timeout: cli.timeout_duration(),
         retries: cli.retries,
+        anonymity: !cli.no_anonymity,
+        local_ip,
     });
 
     let total = proxies.len();
@@ -111,6 +126,28 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+async fn resolve_local_ip(cli: &Cli) -> Option<String> {
+    let target = Target::parse(&cli.local_ip_url).ok()?;
+    match transport::get_direct(&target, Duration::from_secs(5)).await {
+        Ok(response) if response.is_success() => anonymity::exit_ip_from_text(&response.text()),
+        Ok(response) => {
+            if !cli.quiet {
+                eprintln!(
+                    "warning: cannot determine the local IP: HTTP {}",
+                    response.status
+                );
+            }
+            None
+        }
+        Err(error) => {
+            if !cli.quiet {
+                eprintln!("warning: cannot determine the local IP: {error}");
+            }
+            None
+        }
+    }
+}
+
 fn build_progress(cli: &Cli, total: usize) -> Option<ProgressBar> {
     if cli.no_progress || cli.quiet || !std::io::stderr().is_terminal() {
         return None;
@@ -144,6 +181,13 @@ fn print_results(cli: &Cli, results: &[CheckResult]) {
         if cli.alive_only && !result.alive {
             continue;
         }
+        if let Some(minimum) = cli.min_anonymity
+            && !result
+                .anonymity
+                .is_some_and(|level| level.satisfies(minimum))
+        {
+            continue;
+        }
         if cli.quiet {
             if result.alive {
                 println!("{}", endpoint(&result.proxy));
@@ -153,13 +197,14 @@ fn print_results(cli: &Cli, results: &[CheckResult]) {
 
         match &result.error {
             None => println!(
-                "alive  {:<44} {:>6} ms  HTTP {}",
+                "alive  {:<40} {:>6} ms  {:<11}  HTTP {}",
                 endpoint(&result.proxy),
                 result.latency_ms(),
+                result.anonymity.map(|level| level.as_str()).unwrap_or("-"),
                 result.status_code.unwrap_or_default()
             ),
             Some(error) => println!(
-                "dead   {:<44} {:>6} ms  {error}",
+                "dead   {:<40} {:>6} ms  {error}",
                 endpoint(&result.proxy),
                 result.latency_ms()
             ),

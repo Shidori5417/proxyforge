@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
+use crate::anonymity;
 use crate::proxy::Proxy;
 use crate::report::CheckResult;
 use crate::transport::{self, Target};
@@ -24,6 +25,10 @@ pub struct CheckSettings {
     pub timeout: Duration,
     /// Extra attempts after the first failure.
     pub retries: u32,
+    /// Classify proxies by anonymity using the judge response.
+    pub anonymity: bool,
+    /// Local public IP, used to spot transparent proxies.
+    pub local_ip: Option<String>,
 }
 
 /// Probes one proxy, retrying failed attempts up to `settings.retries` times.
@@ -34,7 +39,15 @@ pub async fn check_proxy(proxy: &Proxy, settings: &CheckSettings) -> CheckResult
     for _ in 0..=settings.retries {
         match transport::get(proxy, &settings.target, settings.timeout).await {
             Ok(response) if response.is_success() => {
-                return CheckResult::alive(proxy.clone(), started.elapsed(), Some(response.status));
+                let mut result =
+                    CheckResult::alive(proxy.clone(), started.elapsed(), Some(response.status));
+                if settings.anonymity {
+                    let analysis = anonymity::analyze(&response, settings.local_ip.as_deref());
+                    result.anonymity = Some(analysis.level);
+                    result.exit_ip = analysis.exit_ip;
+                    result.leaks = analysis.leaks;
+                }
+                return result;
             }
             Ok(response) => {
                 last_error = format!("judge returned HTTP {}", response.status);
@@ -101,6 +114,8 @@ mod tests {
             target: Target::parse("http://example.com/").unwrap(),
             timeout: Duration::from_millis(500),
             retries: 0,
+            anonymity: false,
+            local_ip: None,
         };
         let result = check_proxy(&proxy, &settings).await;
         assert!(!result.alive);
@@ -114,6 +129,8 @@ mod tests {
             target: Target::parse("http://example.com/").unwrap(),
             timeout: Duration::from_millis(100),
             retries: 2,
+            anonymity: false,
+            local_ip: None,
         };
         let started = Instant::now();
         let result = check_proxy(&proxy, &settings).await;
