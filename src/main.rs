@@ -1,12 +1,38 @@
+mod cli;
+mod input;
 mod proxy;
 
-use std::str::FromStr;
+use anyhow::{Result, bail};
+use clap::Parser;
 
-fn main() {
-    for arg in std::env::args().skip(1) {
-        match proxy::Proxy::from_str(&arg) {
-            Ok(p) => println!("{}", p),
-            Err(err) => eprintln!("{arg}: {err}"),
+use crate::cli::Cli;
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let loaded = input::load(&cli)?;
+
+    for warning in loaded.warnings() {
+        eprintln!("warning: {warning}");
+    }
+
+    let mut proxies = loaded.proxies;
+    if !cli.protocols.is_empty() {
+        proxies.retain(|proxy| cli.protocols.contains(&proxy.protocol));
+    }
+    if proxies.is_empty() {
+        bail!("no proxies left after applying the protocol filter");
+    }
+
+    if !cli.quiet {
+        eprintln!("loaded {} proxies", proxies.len());
+    }
+    for proxy in &proxies {
+        if cli.show_credentials {
+            println!("{}", proxy.to_url());
+        } else {
+            println!("{}", proxy.redacted());
         }
     }
+
+    Ok(())
 }

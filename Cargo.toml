@@ -6,7 +6,6 @@ rust-version = "1.85"
 description = "Fast, concurrent proxy checker for HTTP, HTTPS, SOCKS4 and SOCKS5 proxies"
 license = "MIT"
 repository = "https://github.com/OWNER/proxyforge"
-homepage = "https://github.com/OWNER/proxyforge"
 keywords = ["proxy", "proxy-checker", "socks5", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 exclude = ["/.github", "/tests/fixtures"]
