@@ -32,7 +32,7 @@ const LEAK_HEADERS: &[&str] = &[
     "x-real-ip",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum AnonymityLevel {
     /// The client IP is visible to the judge.
     Transparent,
@@ -41,6 +41,7 @@ pub enum AnonymityLevel {
     /// Neither the client IP nor the proxy is visible.
     Elite,
     /// The judge did not reveal enough information.
+    #[default]
     Unknown,
 }
 
@@ -87,12 +88,6 @@ pub struct Anonymity {
     pub exit_ip: Option<String>,
     /// Forwarding headers that were visible to the judge.
     pub leaks: Vec<String>,
-}
-
-impl Default for AnonymityLevel {
-    fn default() -> Self {
-        AnonymityLevel::Unknown
-    }
 }
 
 /// Classifies a judge response. `local_ip` is the machine's own public IP,

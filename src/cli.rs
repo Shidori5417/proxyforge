@@ -140,13 +140,6 @@ pub enum Format {
     Csv,
 }
 
-impl Format {
-    /// Formats meant to be consumed by other tools.
-    pub const fn is_machine_readable(self) -> bool {
-        matches!(self, Format::Json | Format::Jsonl | Format::Csv)
-    }
-}
-
 impl std::fmt::Display for Format {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

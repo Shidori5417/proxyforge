@@ -2,14 +2,15 @@ mod anonymity;
 mod checker;
 mod cli;
 mod input;
+mod output;
 mod proxy;
 mod report;
 mod transport;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -18,9 +19,9 @@ use tokio::sync::mpsc;
 
 use crate::checker::CheckSettings;
 use crate::cli::Cli;
-use crate::proxy::Proxy;
+use crate::output::Report;
 use crate::report::CheckResult;
-use crate::transport::Target;
+use crate::transport::{Target, get_direct};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,6 +71,8 @@ async fn run(cli: Cli) -> Result<()> {
     let total = proxies.len();
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
+
+    let started = Instant::now();
     let _workers = checker::spawn_workers(
         proxies,
         settings,
@@ -107,15 +110,11 @@ async fn run(cli: Cli) -> Result<()> {
         bar.finish_and_clear();
     }
 
-    print_results(&cli, &results);
+    let report = Report::build(results, &cli, started.elapsed());
+    write_report(&cli, &report.render(&cli)?)?;
 
-    let alive = results.iter().filter(|result| result.alive).count();
     if !cli.quiet && !cli.no_summary {
-        eprintln!(
-            "\n{} checked, {alive} alive, {} dead",
-            results.len(),
-            results.len() - alive
-        );
+        eprintln!("\n{}", report.stats.render());
     }
 
     if interrupted {
@@ -126,9 +125,29 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+fn write_report(cli: &Cli, text: &str) -> Result<()> {
+    if let Some(path) = &cli.output {
+        std::fs::write(path, text)
+            .with_context(|| format!("cannot write the report to `{}`", path.display()))?;
+        if !cli.quiet {
+            eprintln!("report written to {}", path.display());
+        }
+        return Ok(());
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.context("cannot write the report to stdout"),
+    }
+}
+
 async fn resolve_local_ip(cli: &Cli) -> Option<String> {
     let target = Target::parse(&cli.local_ip_url).ok()?;
-    match transport::get_direct(&target, Duration::from_secs(5)).await {
+    match get_direct(&target, Duration::from_secs(5)).await {
         Ok(response) if response.is_success() => anonymity::exit_ip_from_text(&response.text()),
         Ok(response) => {
             if !cli.quiet {
@@ -166,48 +185,4 @@ fn build_progress(cli: &Cli, total: usize) -> Option<ProgressBar> {
     bar.set_style(style);
     bar.enable_steady_tick(Duration::from_millis(120));
     Some(bar)
-}
-
-fn print_results(cli: &Cli, results: &[CheckResult]) {
-    let endpoint = |proxy: &Proxy| {
-        if cli.show_credentials {
-            proxy.to_url()
-        } else {
-            proxy.redacted()
-        }
-    };
-
-    for result in results {
-        if cli.alive_only && !result.alive {
-            continue;
-        }
-        if let Some(minimum) = cli.min_anonymity
-            && !result
-                .anonymity
-                .is_some_and(|level| level.satisfies(minimum))
-        {
-            continue;
-        }
-        if cli.quiet {
-            if result.alive {
-                println!("{}", endpoint(&result.proxy));
-            }
-            continue;
-        }
-
-        match &result.error {
-            None => println!(
-                "alive  {:<40} {:>6} ms  {:<11}  HTTP {}",
-                endpoint(&result.proxy),
-                result.latency_ms(),
-                result.anonymity.map(|level| level.as_str()).unwrap_or("-"),
-                result.status_code.unwrap_or_default()
-            ),
-            Some(error) => println!(
-                "dead   {:<40} {:>6} ms  {error}",
-                endpoint(&result.proxy),
-                result.latency_ms()
-            ),
-        }
-    }
 }

@@ -295,7 +295,7 @@ async fn read_head<S: AsyncRead + Unpin + ?Sized>(
 ) -> Result<Vec<u8>, TransportError> {
     let mut chunk = [0u8; 4096];
     loop {
-        if let Some(position) = find(&buffer, b"\r\n\r\n") {
+        if let Some(position) = find(buffer, b"\r\n\r\n") {
             let rest = buffer.split_off(position + 4);
             return Ok(std::mem::replace(buffer, rest));
         }
