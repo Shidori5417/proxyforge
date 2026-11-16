@@ -99,6 +99,15 @@ impl Target {
         let scheme = if self.tls { "https" } else { "http" };
         format!("{scheme}://{}{}", self.host_header(), self.path)
     }
+
+    /// `host:port` with the port always present, as required by `CONNECT`.
+    fn connect_authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 /// HTTP response with lower-cased header names.
@@ -465,7 +474,7 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
     proxy: &Proxy,
     target: &Target,
 ) -> Result<(), TransportError> {
-    let authority = target.host_header();
+    let authority = target.connect_authority();
     let mut request = format!(
         "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {USER_AGENT}\r\n"
     );
@@ -808,6 +817,7 @@ mod tests {
         assert_eq!(target.port, 443);
         assert_eq!(target.path, "/path?q=1");
         assert_eq!(target.host_header(), "example.com");
+        assert_eq!(target.connect_authority(), "example.com:443");
 
         let plain = Target::parse("http://example.com:8080").unwrap();
         assert!(!plain.tls);
