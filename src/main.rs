@@ -1,3 +1,12 @@
+mod proxy;
+
+use std::str::FromStr;
+
 fn main() {
-    println!("proxyforge {}", env!("CARGO_PKG_VERSION"));
+    for arg in std::env::args().skip(1) {
+        match proxy::Proxy::from_str(&arg) {
+            Ok(p) => println!("{}", p),
+            Err(err) => eprintln!("{arg}: {err}"),
+        }
+    }
 }
