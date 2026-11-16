@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.log
+/proxies.txt
+/results.*
+.DS_Store
