@@ -1,6 +1,7 @@
 mod cli;
 mod input;
 mod proxy;
+mod transport;
 
 use anyhow::{Result, bail};
 use clap::Parser;
