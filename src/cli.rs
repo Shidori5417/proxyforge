@@ -158,6 +158,6 @@ pub enum Sort {
     Latency,
     /// Alphabetical by endpoint
     Proxy,
-    /// Alive before dead, then by latency
+    /// Alive first, keeping the input order
     Status,
 }
