@@ -140,6 +140,16 @@ pub enum Format {
     Csv,
 }
 
+impl Sort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Sort::Latency => "latency",
+            Sort::Proxy => "proxy",
+            Sort::Status => "status",
+        }
+    }
+}
+
 impl std::fmt::Display for Format {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
