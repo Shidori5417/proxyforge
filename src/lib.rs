@@ -20,3 +20,4 @@ pub mod output;
 pub mod proxy;
 pub mod report;
 pub mod transport;
+pub mod tui;
