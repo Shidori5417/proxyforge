@@ -104,6 +104,10 @@ pub struct Cli {
     #[arg(long)]
     pub show_credentials: bool,
 
+    /// Open the interactive dashboard instead of printing a report
+    #[arg(long)]
+    pub tui: bool,
+
     /// Print one endpoint per line, without table borders or summary
     #[arg(short, long)]
     pub quiet: bool,

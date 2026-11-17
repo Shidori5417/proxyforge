@@ -15,6 +15,7 @@ use proxyforge::input;
 use proxyforge::output::Report;
 use proxyforge::report::CheckResult;
 use proxyforge::transport::{Target, get_direct};
+use proxyforge::tui::{self, TuiConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,6 +61,21 @@ async fn run(cli: Cli) -> Result<()> {
         anonymity: !cli.no_anonymity,
         local_ip,
     });
+
+    if cli.tui {
+        tui::run(
+            proxies,
+            settings,
+            TuiConfig {
+                judge: cli.judge.clone(),
+                workers: cli.concurrency as usize,
+                show_credentials: cli.show_credentials,
+                sort: cli.sort,
+            },
+        )
+        .await?;
+        return Ok(());
+    }
 
     let total = proxies.len();
     let (sender, mut receiver) = mpsc::unbounded_channel();
