@@ -13,6 +13,7 @@ Türkçe dokümantasyon: [README.tr.md](README.tr.md)
 ## Features
 
 - Checks HTTP, HTTPS (via `CONNECT`), SOCKS4/4a, SOCKS5 and SOCKS5h proxies.
+- Interactive terminal dashboard (`--tui`) with live progress, filters and sorting.
 - Username/password authentication for HTTP (`Proxy-Authorization`) and SOCKS5.
 - High concurrency with a worker pool — a slow proxy never blocks the line.
 - Per-proxy timeout, optional retries and accurate latency measurements.
@@ -99,6 +100,7 @@ proxyforge [OPTIONS] [PROXY]...
 | `--no-anonymity` | Skip anonymity detection (saves one request) |
 | `--local-ip-url <URL>` | URL used once to learn the local public IP |
 | `--show-credentials` | Print credentials instead of `***:***` |
+| `--tui` | Open the interactive dashboard |
 | `-q, --quiet` | Print only alive endpoints, no table or summary |
 | `--no-summary` | Hide the summary block |
 | `--no-progress` | Hide the progress bar |
@@ -144,6 +146,27 @@ JSON output is an array of objects:
 CSV uses the same fields. Use `--show-credentials` to keep usernames and
 passwords in the output.
 
+## Interactive dashboard
+
+`--tui` opens a live dashboard while the checks run:
+
+![proxyforge interactive dashboard](docs/tui.png)
+
+| Key | Action |
+| --- | --- |
+| `q` / `Esc` | Quit (the first `Esc` closes the help overlay) |
+| `↑` `↓` / `j` `k` | Move the cursor |
+| `PgUp` / `PgDn` | Move one page |
+| `g` / `G` | Jump to the first / last proxy |
+| `f` | Cycle the filter: all → alive → dead |
+| `s` | Cycle the sort order: latency → proxy → status |
+| `?` | Show or hide the help overlay |
+
+The details pane follows the cursor and shows the full error, the leaked
+forwarding headers and the exit IP. Quitting cancels the remaining checks and
+restores the terminal. Report options such as `--format` and `--output` only
+apply to the non-interactive mode.
+
 ## Anonymity levels
 
 The checker resolves your own public IP once (without a proxy) and then compares
@@ -173,6 +196,7 @@ src/
 ├── checker.rs    # worker pool, retries, latency
 ├── anonymity.rs  # judge payload analysis
 ├── output.rs     # filtering, sorting, table/JSON/CSV
+├── tui/          # dashboard state, rendering and event loop
 ├── input.rs      # argument, file and stdin loading
 └── main.rs       # CLI wiring, progress and Ctrl-C handling
 ```

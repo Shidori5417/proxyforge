@@ -13,6 +13,7 @@ English documentation: [README.md](README.md)
 ## Özellikler
 
 - HTTP, HTTPS (`CONNECT` üzerinden), SOCKS4/4a, SOCKS5 ve SOCKS5h desteği.
+- Canlı ilerleme, filtreleme ve sıralama sunan etkileşimli terminal panosu (`--tui`).
 - HTTP (`Proxy-Authorization`) ve SOCKS5 için kullanıcı adı/şifre doğrulaması.
 - İşçi havuzu sayesinde yüksek eşzamanlılık — yavaş bir proxy sırayı tıkamaz.
 - Proxy başına zaman aşımı, isteğe bağlı yeniden deneme ve doğru gecikme ölçümü.
@@ -99,6 +100,7 @@ proxyforge [SEÇENEKLER] [PROXY]...
 | `--no-anonymity` | Anonimlik tespitini atla (bir istek tasarrufu) |
 | `--local-ip-url <URL>` | Yerel genel IP'yi öğrenmek için bir kez kullanılan URL |
 | `--show-credentials` | `***:***` yerine kimlik bilgilerini yazdır |
+| `--tui` | Etkileşimli panoyu aç |
 | `-q, --quiet` | Sadece canlı uç noktaları yazdır, tablo ve özet yok |
 | `--no-summary` | Özet bloğunu gizle |
 | `--no-progress` | İlerleme çubuğunu gizle |
@@ -144,6 +146,27 @@ JSON çıktısı bir nesne dizisidir:
 CSV aynı alanları kullanır. Kimlik bilgilerini çıktıda tutmak için
 `--show-credentials` kullanın.
 
+## Etkileşimli pano
+
+`--tui` kontroller sürerken canlı bir pano açar:
+
+![proxyforge etkileşimli panosu](docs/tui.png)
+
+| Tuş | İşlev |
+| --- | --- |
+| `q` / `Esc` | Çık (ilk `Esc` yalnızca yardım penceresini kapatır) |
+| `↑` `↓` / `j` `k` | İmleci hareket ettir |
+| `PgUp` / `PgDn` | Bir sayfa kaydır |
+| `g` / `G` | İlk / son proxy'ye git |
+| `f` | Filtreyi değiştir: all → alive → dead |
+| `s` | Sıralamayı değiştir: latency → proxy → status |
+| `?` | Yardım penceresini aç/kapat |
+
+Ayrıntı panosu imleci takip eder; tam hatayı, sızan yönlendirme başlıklarını ve
+çıkış IP'sini gösterir. Çıkış kalan kontrolleri iptal eder ve terminali eski
+hâline döndürür. `--format` ve `--output` gibi rapor seçenekleri yalnızca
+etkileşimli olmayan modda geçerlidir.
+
 ## Anonimlik seviyeleri
 
 Checker kendi genel IP'nizi bir kez (proxy'siz) öğrenir ve her proxy üzerinden
@@ -173,6 +196,7 @@ src/
 ├── checker.rs    # işçi havuzu, yeniden deneme, gecikme
 ├── anonymity.rs  # judge yanıtı analizi
 ├── output.rs     # filtreleme, sıralama, tablo/JSON/CSV
+├── tui/          # pano durumu, çizim ve olay döngüsü
 ├── input.rs      # argüman, dosya ve stdin yükleme
 └── main.rs       # CLI bağlantısı, ilerleme ve Ctrl-C
 ```
