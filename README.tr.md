@@ -8,7 +8,7 @@ proxy checker. Rust ile yazıldı.
 
 English documentation: [README.md](README.md)
 
-![proxyforge; HTTP, SOCKS4 ve SOCKS5 proxy'lerinden oluşan bir listeyi kontrol ediyor](docs/demo.png)
+![proxyforge etkileşimli panosu](docs/tui.png)
 
 ## Özellikler
 
@@ -124,6 +124,8 @@ latency avg 142 ms · fastest 142 ms · slowest 142 ms
 anonymity elite 1 · anonymous 0 · transparent 0 · unknown 0
 ```
 
+![proxyforge; HTTP, SOCKS4 ve SOCKS5 proxy'lerinden oluşan bir listeyi kontrol ediyor](docs/demo.png)
+
 JSON çıktısı bir nesne dizisidir:
 
 ```json
@@ -148,9 +150,7 @@ CSV aynı alanları kullanır. Kimlik bilgilerini çıktıda tutmak için
 
 ## Etkileşimli pano
 
-`--tui` kontroller sürerken canlı bir pano açar:
-
-![proxyforge etkileşimli panosu](docs/tui.png)
+`--tui`, sayfanın başında görünen canlı panoyu açar:
 
 | Tuş | İşlev |
 | --- | --- |

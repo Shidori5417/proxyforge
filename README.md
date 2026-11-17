@@ -8,7 +8,7 @@ proxies, written in Rust.
 
 Türkçe dokümantasyon: [README.tr.md](README.tr.md)
 
-![proxyforge checking a mixed batch of HTTP, SOCKS4 and SOCKS5 proxies](docs/demo.png)
+![proxyforge interactive dashboard](docs/tui.png)
 
 ## Features
 
@@ -124,6 +124,8 @@ latency avg 142 ms · fastest 142 ms · slowest 142 ms
 anonymity elite 1 · anonymous 0 · transparent 0 · unknown 0
 ```
 
+![proxyforge checking a mixed batch of HTTP, SOCKS4 and SOCKS5 proxies](docs/demo.png)
+
 JSON output is an array of objects:
 
 ```json
@@ -148,9 +150,7 @@ passwords in the output.
 
 ## Interactive dashboard
 
-`--tui` opens a live dashboard while the checks run:
-
-![proxyforge interactive dashboard](docs/tui.png)
+`--tui` opens the live dashboard shown at the top of this page:
 
 | Key | Action |
 | --- | --- |
