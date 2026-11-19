@@ -224,7 +224,6 @@ pub enum Sort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser as _;
 
     #[test]
     fn completions_subcommand_parses() {
