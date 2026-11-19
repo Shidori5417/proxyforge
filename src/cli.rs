@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::anonymity::AnonymityLevel;
 use crate::proxy::Protocol;
@@ -159,6 +159,15 @@ pub struct Cli {
     /// Disable ANSI colours in the table
     #[arg(long)]
     pub no_color: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Print shell completions for the given shell
+    Completions { shell: clap_complete::Shell },
 }
 
 impl Cli {
@@ -210,4 +219,28 @@ pub enum Sort {
     Proxy,
     /// Alive first, keeping the input order
     Status,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    #[test]
+    fn completions_subcommand_parses() {
+        let cli = Cli::parse_from(["proxyforge", "completions", "fish"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions {
+                shell: clap_complete::Shell::Fish
+            })
+        ));
+    }
+
+    #[test]
+    fn no_subcommand_still_parses_endpoints() {
+        let cli = Cli::parse_from(["proxyforge", "1.2.3.4:8080"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.proxies, vec!["1.2.3.4:8080"]);
+    }
 }

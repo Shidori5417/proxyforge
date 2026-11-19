@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use proxyforge::anonymity;
 use proxyforge::checker::{self, CheckSettings};
-use proxyforge::cli::Cli;
+use proxyforge::cli::{Cli, Command};
 use proxyforge::geo::GeoDb;
 use proxyforge::input;
 use proxyforge::output::Report;
@@ -22,6 +22,13 @@ use proxyforge::tui::{self, TuiConfig};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Command::Completions { shell }) = &cli.command {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        clap_complete::generate(*shell, &mut command, "proxyforge", &mut std::io::stdout());
+        return Ok(());
+    }
+
     run(cli).await
 }
 
