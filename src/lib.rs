@@ -20,5 +20,6 @@ pub mod input;
 pub mod output;
 pub mod proxy;
 pub mod report;
+pub mod serve;
 pub mod transport;
 pub mod tui;

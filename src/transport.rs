@@ -33,7 +33,7 @@ const MAX_LINE_SIZE: usize = 8 * 1024;
 pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> AsyncStream for T {}
 
-type BoxStream = Box<dyn AsyncStream>;
+pub(crate) type BoxStream = Box<dyn AsyncStream>;
 
 /// Destination requested through the proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,7 +232,7 @@ fn tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-async fn tls_wrap(
+pub(crate) async fn tls_wrap(
     host: &str,
     stream: BoxStream,
 ) -> Result<tokio_rustls::client::TlsStream<BoxStream>, TransportError> {
@@ -289,7 +289,7 @@ async fn read_response<S: AsyncRead + Unpin + ?Sized>(
 
 /// Reads everything up to and including the blank line that ends the headers.
 /// Any body bytes that arrived in the same read stay in `buffer`.
-async fn read_head<S: AsyncRead + Unpin + ?Sized>(
+pub(crate) async fn read_head<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
     buffer: &mut Vec<u8>,
 ) -> Result<Vec<u8>, TransportError> {
@@ -486,7 +486,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-async fn http_connect<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
+pub(crate) async fn http_connect<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
     stream: &mut S,
     proxy: &Proxy,
     target: &Target,
@@ -533,7 +533,7 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
     }
 }
 
-async fn socks_handshake<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
+pub(crate) async fn socks_handshake<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
     stream: &mut S,
     proxy: &Proxy,
     target: &Target,
