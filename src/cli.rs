@@ -31,14 +31,18 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE_OR_URL")]
     pub input: Vec<String>,
 
-    /// URL requested through every proxy to prove it works
+    /// URL(s) requested through every proxy; attempts rotate through them
     #[arg(
         short,
         long,
         value_name = "URL",
-        default_value = "https://httpbin.org/get"
+        default_values_t = vec![String::from("https://httpbin.org/get")]
     )]
-    pub judge: String,
+    pub judge: Vec<String>,
+
+    /// Require this text in the judge response, otherwise the proxy is dead
+    #[arg(long, value_name = "TEXT")]
+    pub expect: Option<String>,
 
     /// Do not classify proxies by anonymity
     #[arg(long)]

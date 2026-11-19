@@ -40,8 +40,10 @@ async fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    let target =
-        Target::parse(&cli.judge).with_context(|| format!("invalid judge URL `{}`", cli.judge))?;
+    let mut judges = Vec::with_capacity(cli.judge.len());
+    for url in &cli.judge {
+        judges.push(Target::parse(url).with_context(|| format!("invalid judge URL `{url}`"))?);
+    }
 
     let local_ip = if cli.no_anonymity {
         None
@@ -55,9 +57,10 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let settings = Arc::new(CheckSettings {
-        target,
+        judges,
         timeout: cli.timeout_duration(),
         retries: cli.retries,
+        expect: cli.expect.clone(),
         anonymity: !cli.no_anonymity,
         local_ip,
     });
@@ -67,7 +70,12 @@ async fn run(cli: Cli) -> Result<()> {
             proxies,
             settings,
             TuiConfig {
-                judge: cli.judge.clone(),
+                judge: cli
+                    .judge
+                    .first()
+                    .and_then(|url| Target::parse(url).ok())
+                    .map(|target| target.host_header())
+                    .unwrap_or_else(|| "judge".into()),
                 workers: cli.concurrency as usize,
                 show_credentials: cli.show_credentials,
                 sort: cli.sort,

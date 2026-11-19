@@ -327,6 +327,14 @@ mod tests {
     }
 
     #[test]
+    fn does_not_scrape_bare_addresses_inside_schemed_urls() {
+        let found = extract_endpoints("http://user:pass@1.2.3.4:8080 and 5.6.7.8:3128");
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&"http://user:pass@1.2.3.4:8080".to_string()));
+        assert!(found.contains(&"5.6.7.8:3128".to_string()));
+    }
+
+    #[test]
     fn extraction_ignores_non_proxies() {
         let found = extract_endpoints("version 1.2.3.4 built at 10:20:30 no proxies here");
         assert!(found.is_empty());

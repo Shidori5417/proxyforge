@@ -21,10 +21,14 @@ use crate::transport::{self, Target};
 /// Everything a worker needs to probe a proxy.
 #[derive(Debug, Clone)]
 pub struct CheckSettings {
-    pub target: Target,
+    /// Judge endpoints; attempts rotate through them so a single flaky
+    /// judge does not condemn an otherwise working proxy.
+    pub judges: Vec<Target>,
     pub timeout: Duration,
     /// Extra attempts after the first failure.
     pub retries: u32,
+    /// Text that must appear in the judge response.
+    pub expect: Option<String>,
     /// Classify proxies by anonymity using the judge response.
     pub anonymity: bool,
     /// Local public IP, used to spot transparent proxies.
@@ -36,9 +40,16 @@ pub async fn check_proxy(proxy: &Proxy, settings: &CheckSettings) -> CheckResult
     let started = Instant::now();
     let mut last_error = String::from("no attempt was made");
 
-    for _ in 0..=settings.retries {
-        match transport::get(proxy, &settings.target, settings.timeout).await {
+    for attempt in 0..=settings.retries {
+        let target = &settings.judges[attempt as usize % settings.judges.len()];
+        match transport::get(proxy, target, settings.timeout).await {
             Ok(response) if response.is_success() => {
+                if let Some(expected) = &settings.expect
+                    && !response.text().contains(expected.as_str())
+                {
+                    last_error = format!("unexpected judge response, missing `{expected}`");
+                    continue;
+                }
                 let mut result =
                     CheckResult::alive(proxy.clone(), started.elapsed(), Some(response.status));
                 if settings.anonymity {
@@ -111,9 +122,10 @@ mod tests {
         // Port 1 on loopback is refused immediately.
         let proxy = Proxy::new(Protocol::Http, "127.0.0.1", 1);
         let settings = CheckSettings {
-            target: Target::parse("http://example.com/").unwrap(),
+            judges: vec![Target::parse("http://example.com/").unwrap()],
             timeout: Duration::from_millis(500),
             retries: 0,
+            expect: None,
             anonymity: false,
             local_ip: None,
         };
@@ -126,9 +138,10 @@ mod tests {
     async fn retries_are_attempted() {
         let proxy = Proxy::new(Protocol::Http, "127.0.0.1", 1);
         let settings = CheckSettings {
-            target: Target::parse("http://example.com/").unwrap(),
+            judges: vec![Target::parse("http://example.com/").unwrap()],
             timeout: Duration::from_millis(100),
             retries: 2,
+            expect: None,
             anonymity: false,
             local_ip: None,
         };

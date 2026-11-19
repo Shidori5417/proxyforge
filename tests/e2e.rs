@@ -102,6 +102,19 @@ async fn spawn_judge(extra_headers: Vec<(String, String)>) -> SocketAddr {
     .await
 }
 
+/// Judge that always fails with the given status, to test rotation.
+async fn spawn_broken_judge() -> SocketAddr {
+    spawn(move |stream| async move {
+        let mut reader = BufReader::new(stream);
+        let _ = read_head(&mut reader).await;
+        let mut stream = reader.into_inner();
+        let _ = stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+    })
+    .await
+}
+
 /// Serves a raw page containing proxy endpoints, like a public list site.
 async fn spawn_list_page(body: &'static str) -> SocketAddr {
     spawn(move |stream| async move {
@@ -303,9 +316,10 @@ async fn spawn_socks5(credentials: Option<(&'static str, &'static str)>) -> Sock
 
 fn settings(judge: SocketAddr) -> CheckSettings {
     CheckSettings {
-        target: Target::parse(&format!("http://{judge}/get")).unwrap(),
+        judges: vec![Target::parse(&format!("http://{judge}/get")).unwrap()],
         timeout: Duration::from_secs(3),
         retries: 0,
+        expect: None,
         anonymity: true,
         local_ip: Some("198.51.100.1".into()),
     }
@@ -523,4 +537,37 @@ async fn scrapes_proxies_from_a_remote_list() {
         .unwrap();
     let result = check_proxy(scraped, &settings).await;
     assert!(result.alive, "error: {:?}", result.error);
+}
+
+#[tokio::test]
+async fn retries_rotate_to_the_next_judge() {
+    let broken = spawn_broken_judge().await;
+    let judge = spawn_judge(Vec::new()).await;
+    let address = spawn_http_proxy().await;
+
+    let mut settings = settings(judge);
+    settings.judges = vec![
+        Target::parse(&format!("http://{broken}/get")).unwrap(),
+        Target::parse(&format!("http://{judge}/get")).unwrap(),
+    ];
+    settings.retries = 1;
+
+    let result = check_proxy(&proxy(Protocol::Http, address), &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
+}
+
+#[tokio::test]
+async fn missing_expect_text_marks_the_proxy_dead() {
+    let judge = spawn_judge(Vec::new()).await;
+    let address = spawn_http_proxy().await;
+
+    let mut settings = settings(judge);
+    settings.expect = Some("203.0.113.7".into());
+    let result = check_proxy(&proxy(Protocol::Http, address), &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
+
+    settings.expect = Some("this-text-is-not-there".into());
+    let result = check_proxy(&proxy(Protocol::Http, address), &settings).await;
+    assert!(!result.alive);
+    assert!(result.error.unwrap().contains("missing"));
 }
