@@ -15,6 +15,7 @@
 pub mod anonymity;
 pub mod checker;
 pub mod cli;
+pub mod geo;
 pub mod input;
 pub mod output;
 pub mod proxy;

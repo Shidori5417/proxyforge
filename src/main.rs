@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use proxyforge::anonymity;
 use proxyforge::checker::{self, CheckSettings};
 use proxyforge::cli::Cli;
+use proxyforge::geo::GeoDb;
 use proxyforge::input;
 use proxyforge::output::Report;
 use proxyforge::report::CheckResult;
@@ -56,12 +57,23 @@ async fn run(cli: Cli) -> Result<()> {
         eprintln!("local IP: {ip}");
     }
 
+    let geo = if cli.geo_db.is_empty() {
+        None
+    } else {
+        let paths: Vec<std::path::PathBuf> =
+            cli.geo_db.iter().map(std::path::PathBuf::from).collect();
+        Some(Arc::new(
+            GeoDb::open(&paths).context("cannot load the GeoIP databases")?,
+        ))
+    };
+
     let settings = Arc::new(CheckSettings {
         judges,
         timeout: cli.timeout_duration(),
         retries: cli.retries,
         expect: cli.expect.clone(),
         detect: cli.detect,
+        geo,
         anonymity: !cli.no_anonymity,
         local_ip,
     });

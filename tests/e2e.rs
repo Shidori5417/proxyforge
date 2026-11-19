@@ -327,6 +327,7 @@ fn settings(judge: SocketAddr) -> CheckSettings {
         retries: 0,
         expect: None,
         detect: false,
+        geo: None,
         anonymity: true,
         local_ip: Some("198.51.100.1".into()),
     }

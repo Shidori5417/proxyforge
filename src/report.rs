@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::anonymity::AnonymityLevel;
+use crate::geo::GeoInfo;
 use crate::proxy::Proxy;
 
 /// Result of probing one proxy endpoint.
@@ -20,6 +21,8 @@ pub struct CheckResult {
     pub exit_ip: Option<String>,
     /// Forwarding headers the judge could see.
     pub leaks: Vec<String>,
+    /// Country and ASN of the exit IP, when a GeoIP database was given.
+    pub geo: Option<GeoInfo>,
     pub error: Option<String>,
 }
 
@@ -33,6 +36,7 @@ impl CheckResult {
             anonymity: None,
             exit_ip: None,
             leaks: Vec::new(),
+            geo: None,
             error: None,
         }
     }
@@ -46,6 +50,7 @@ impl CheckResult {
             anonymity: None,
             exit_ip: None,
             leaks: Vec::new(),
+            geo: None,
             error: Some(error.into()),
         }
     }

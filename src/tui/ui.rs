@@ -119,6 +119,7 @@ fn draw_results(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
         "Latency",
         "Anonymity",
         "Exit IP",
+        "Geo",
         "Detail",
     ])
     .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
@@ -135,6 +136,7 @@ fn draw_results(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
         Constraint::Length(9),
         Constraint::Length(12),
         Constraint::Length(15),
+        Constraint::Length(14),
         Constraint::Min(10),
     ];
 
@@ -191,6 +193,13 @@ fn row(result: &CheckResult, show_credentials: bool) -> Row<'static> {
         Cell::from(format!("{:>6} ms", result.latency_ms())),
         anonymity,
         Cell::from(result.exit_ip.clone().unwrap_or_else(|| "-".into())),
+        Cell::from(
+            result
+                .geo
+                .as_ref()
+                .map(|geo| geo.label())
+                .unwrap_or_else(|| "-".into()),
+        ),
         Cell::from(detail),
     ])
 }

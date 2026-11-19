@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use crate::anonymity;
+use crate::geo::GeoDb;
 use crate::proxy::Proxy;
 use crate::report::CheckResult;
 use crate::transport::{self, Target};
@@ -31,6 +32,8 @@ pub struct CheckSettings {
     pub expect: Option<String>,
     /// Probe bare host:port entries for HTTP, SOCKS5 and SOCKS4 support.
     pub detect: bool,
+    /// Optional offline GeoIP databases for exit IP enrichment.
+    pub geo: Option<std::sync::Arc<GeoDb>>,
     /// Classify proxies by anonymity using the judge response.
     pub anonymity: bool,
     /// Local public IP, used to spot transparent proxies.
@@ -175,6 +178,7 @@ mod tests {
             retries: 0,
             expect: None,
             detect: false,
+            geo: None,
             anonymity: false,
             local_ip: None,
         };
@@ -192,6 +196,7 @@ mod tests {
             retries: 2,
             expect: None,
             detect: false,
+            geo: None,
             anonymity: false,
             local_ip: None,
         };

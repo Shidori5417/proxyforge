@@ -52,6 +52,18 @@ pub struct Cli {
     #[arg(long)]
     pub no_anonymity: bool,
 
+    /// Offline GeoIP database(s) in MaxMind mmdb format, repeatable
+    #[arg(long, value_name = "FILE")]
+    pub geo_db: Vec<String>,
+
+    /// Only report proxies exiting in these countries (comma separated ISO codes)
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub country: Vec<String>,
+
+    /// Drop proxies exiting in these countries
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub exclude_country: Vec<String>,
+
     /// URL used once, without a proxy, to learn the local public IP
     #[arg(long, value_name = "URL", default_value = "https://api.ipify.org")]
     pub local_ip_url: String,

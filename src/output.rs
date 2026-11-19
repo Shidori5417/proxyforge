@@ -154,6 +154,13 @@ impl Report {
                 right(format!("{} ms", result.latency_ms())),
                 anonymity,
                 Cell::new(result.exit_ip.as_deref().unwrap_or("-")),
+                Cell::new(
+                    result
+                        .geo
+                        .as_ref()
+                        .map(|geo| geo.label())
+                        .unwrap_or_else(|| "-".into()),
+                ),
                 Cell::new(detail),
             ]);
         }
@@ -190,6 +197,36 @@ fn keep(result: &CheckResult, cli: &Cli) -> bool {
     {
         return false;
     }
+    country_allowed(result, cli)
+}
+
+/// Checks the --country and --exclude-country filters against the exit IP's
+/// ISO code. Proxies without GeoIP data never pass a positive filter.
+fn country_allowed(result: &CheckResult, cli: &Cli) -> bool {
+    let code = result
+        .geo
+        .as_ref()
+        .and_then(|geo| geo.code.as_deref())
+        .unwrap_or_default();
+
+    if !cli.country.is_empty()
+        && !cli
+            .country
+            .iter()
+            .any(|wanted| wanted.eq_ignore_ascii_case(code))
+    {
+        return false;
+    }
+
+    if !cli.exclude_country.is_empty()
+        && cli
+            .exclude_country
+            .iter()
+            .any(|unwanted| unwanted.eq_ignore_ascii_case(code))
+    {
+        return false;
+    }
+
     true
 }
 
@@ -226,6 +263,10 @@ pub struct Row {
     pub status_code: Option<u16>,
     pub anonymity: Option<String>,
     pub exit_ip: Option<String>,
+    pub country: Option<String>,
+    pub country_code: Option<String>,
+    pub asn: Option<u32>,
+    pub as_org: Option<String>,
     pub error: Option<String>,
 }
 
@@ -245,6 +286,10 @@ impl Row {
             status_code: result.status_code,
             anonymity: result.anonymity.map(|level| level.as_str().to_string()),
             exit_ip: result.exit_ip.clone(),
+            country: result.geo.as_ref().and_then(|geo| geo.country.clone()),
+            country_code: result.geo.as_ref().and_then(|geo| geo.code.clone()),
+            asn: result.geo.as_ref().and_then(|geo| geo.asn),
+            as_org: result.geo.as_ref().and_then(|geo| geo.as_org.clone()),
             error: result.error.clone(),
         }
     }
@@ -486,6 +531,74 @@ mod tests {
         assert_eq!(report.stats.dead, 1);
         assert_eq!(report.stats.avg_latency_ms, Some(200));
         assert!(report.stats.render().contains("2.0 s"));
+    }
+
+    #[test]
+    fn table_shows_the_geo_column() {
+        let mut result = alive(2, 100, "203.0.113.9");
+        result.geo = Some(crate::geo::GeoInfo {
+            country: Some("Germany".into()),
+            code: Some("DE".into()),
+            asn: Some(3320),
+            as_org: Some("Deutsche Telekom".into()),
+        });
+        let report = Report::build(vec![result], &cli(&[]), Duration::from_secs(1));
+        let text = report.render(&cli(&[])).unwrap();
+        assert!(text.contains("DE · AS3320"));
+    }
+
+    #[test]
+    fn country_filter_matches_iso_codes() {
+        let mut german = alive(2, 100, "1.1.1.1");
+        german.geo = Some(crate::geo::GeoInfo {
+            code: Some("DE".into()),
+            ..Default::default()
+        });
+        let mut turkish = alive(3, 100, "2.2.2.2");
+        turkish.geo = Some(crate::geo::GeoInfo {
+            code: Some("TR".into()),
+            ..Default::default()
+        });
+
+        let report = Report::build(
+            vec![german.clone(), turkish.clone()],
+            &cli(&["--country", "de"]),
+            Duration::from_secs(1),
+        );
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].geo, german.geo);
+
+        let report = Report::build(
+            vec![german, turkish],
+            &cli(&["--exclude-country", "tr"]),
+            Duration::from_secs(1),
+        );
+        assert_eq!(report.results.len(), 1);
+    }
+
+    #[test]
+    fn positive_country_filter_needs_geo_data() {
+        let results = vec![alive(2, 100, "1.1.1.1")];
+        let report = Report::build(results, &cli(&["--country", "de"]), Duration::from_secs(1));
+        assert!(report.results.is_empty());
+    }
+
+    #[test]
+    fn json_includes_geo_fields() {
+        let mut result = alive(2, 100, "1.1.1.1");
+        result.geo = Some(crate::geo::GeoInfo {
+            country: Some("Germany".into()),
+            code: Some("DE".into()),
+            asn: Some(3320),
+            as_org: Some("Deutsche Telekom".into()),
+        });
+        let args = cli(&["--format", "json"]);
+        let report = Report::build(vec![result], &args, Duration::from_secs(1));
+        let value: serde_json::Value =
+            serde_json::from_str(&report.render(&args).unwrap()).unwrap();
+        assert_eq!(value[0]["country"], "Germany");
+        assert_eq!(value[0]["country_code"], "DE");
+        assert_eq!(value[0]["asn"], 3320);
     }
 
     #[test]
