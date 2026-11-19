@@ -62,12 +62,7 @@ pub async fn check_proxy(proxy: &Proxy, settings: &CheckSettings) -> CheckResult
                 }
                 let mut result =
                     CheckResult::alive(proxy.clone(), started.elapsed(), Some(response.status));
-                if settings.anonymity {
-                    let analysis = anonymity::analyze(&response, settings.local_ip.as_deref());
-                    result.anonymity = Some(analysis.level);
-                    result.exit_ip = analysis.exit_ip;
-                    result.leaks = analysis.leaks;
-                }
+                enrich(&mut result, &response, settings);
                 return result;
             }
             Ok(response) => {
@@ -78,6 +73,25 @@ pub async fn check_proxy(proxy: &Proxy, settings: &CheckSettings) -> CheckResult
     }
 
     CheckResult::dead(proxy.clone(), started.elapsed(), last_error)
+}
+
+/// Fills in anonymity and GeoIP details from a successful judge response.
+fn enrich(result: &mut CheckResult, response: &transport::Response, settings: &CheckSettings) {
+    if settings.anonymity {
+        let analysis = anonymity::analyze(response, settings.local_ip.as_deref());
+        result.anonymity = Some(analysis.level);
+        result.exit_ip = analysis.exit_ip;
+        result.leaks = analysis.leaks;
+    }
+
+    if let Some(db) = &settings.geo
+        && let Some(ip) = result
+            .exit_ip
+            .as_deref()
+            .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+    {
+        result.geo = Some(db.lookup(ip));
+    }
 }
 
 /// Tries HTTP, then SOCKS5, then SOCKS4 for endpoints given without a scheme
@@ -103,12 +117,7 @@ async fn detect_protocol(proxy: &Proxy, settings: &CheckSettings, started: Insta
 
                 let mut result =
                     CheckResult::alive(candidate, started.elapsed(), Some(response.status));
-                if settings.anonymity {
-                    let analysis = anonymity::analyze(&response, settings.local_ip.as_deref());
-                    result.anonymity = Some(analysis.level);
-                    result.exit_ip = analysis.exit_ip;
-                    result.leaks = analysis.leaks;
-                }
+                enrich(&mut result, &response, settings);
                 return result;
             }
             Ok(response) => {
