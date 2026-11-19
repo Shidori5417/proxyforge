@@ -13,7 +13,12 @@ Türkçe dokümantasyon: [README.tr.md](README.tr.md)
 ## Features
 
 - Checks HTTP, HTTPS (via `CONNECT`), SOCKS4/4a, SOCKS5 and SOCKS5h proxies.
-- Interactive terminal dashboard (`--tui`) with live progress, filters and sorting.
+- Interactive terminal dashboard (`--tui`) with live progress, filters, sorting, export and mouse support.
+- Pulls proxy lists straight from URLs (`--input URL`) out of raw text, HTML or JSON.
+- Protocol auto-detection (`--detect`) for lists that carry no scheme.
+- Offline GeoIP enrichment (`--geo-db`) with country and ASN filters.
+- Multiple judges with rotation and response verification (`--judge`, `--expect`).
+- Rotating proxy server (`--serve`) that forwards traffic through the alive pool.
 - Username/password authentication for HTTP (`Proxy-Authorization`) and SOCKS5.
 - High concurrency with a worker pool — a slow proxy never blocks the line.
 - Per-proxy timeout, optional retries and accurate latency measurements.
@@ -25,6 +30,9 @@ Türkçe dokümantasyon: [README.tr.md](README.tr.md)
   its own connection.
 
 ## Install
+
+Prebuilt binaries for Linux, macOS and Windows are attached to every
+[release](https://github.com/Shidori5417/proxyforge/releases).
 
 Requires a recent stable Rust toolchain (1.85+).
 
@@ -39,6 +47,19 @@ Or build a release binary:
 ```bash
 cargo build --release
 ./target/release/proxyforge --help
+```
+
+Docker:
+
+```bash
+docker build -t proxyforge https://github.com/Shidori5417/proxyforge.git
+docker run --rm -i proxyforge --input - --quiet < proxies.txt
+```
+
+Shell completions:
+
+```bash
+proxyforge completions bash      # also zsh, fish, elvish, powershell
 ```
 
 ## Quick start
@@ -56,11 +77,20 @@ proxyforge -i proxies.txt --alive-only --max-latency 800 \
 
 # Pipe a list in, keep plain endpoints on stdout
 cat proxies.txt | proxyforge -i - --quiet > alive.txt
+
+# Pull lists straight from the web and keep only Turkish exits
+proxyforge -i https://example.com/proxies.txt --geo-db GeoLite2-Country.mmdb \
+  --geo-db GeoLite2-ASN.mmdb --country tr --alive-only
+
+# Check a list with no schemes, then serve the survivors as a local rotator
+proxyforge -i plain.txt --detect --serve 127.0.0.1:8080 --rotate-on-error
+curl -x http://127.0.0.1:8080 https://httpbin.org/get
 ```
 
 ## Input formats
 
-One endpoint per line in a file, or one argument per endpoint:
+One endpoint per line in a file or URL, or one argument per endpoint. Sources given as
+URLs are scraped with a forgiving pattern, so raw HTML and JSON work too:
 
 ```text
 1.2.3.4:8080                       # HTTP proxy on port 8080
@@ -86,7 +116,7 @@ proxyforge [OPTIONS] [PROXY]...
 | Option | Description |
 | --- | --- |
 | `-i, --input <FILE>` | Read endpoints from a file; `-` reads stdin |
-| `-j, --judge <URL>` | URL requested through every proxy (default `https://httpbin.org/get`) |
+| `-j, --judge <URL>` | Judge URL requested through every proxy, repeatable |
 | `-c, --concurrency <N>` | Proxies checked in parallel (default `100`) |
 | `-t, --timeout <SECS>` | Per-proxy timeout (default `8`) |
 | `-r, --retries <N>` | Extra attempts after a failure (default `0`) |
@@ -95,8 +125,13 @@ proxyforge [OPTIONS] [PROXY]...
 | `--alive-only` | Report only proxies that responded |
 | `--max-latency <MS>` | Drop proxies slower than this |
 | `--min-anonymity <LEVEL>` | `transparent`, `anonymous` or `elite` |
+| `--expect <TEXT>` | Mark a proxy dead unless the judge response contains this text |
+| `--detect` | Probe schemesless endpoints for HTTP, SOCKS5 and SOCKS4 |
 | `--protocols <LIST>` | Only check these protocols, comma separated |
 | `--sort <ORDER>` | `latency` (default), `proxy` or `status` |
+| `--geo-db <FILE>` | Offline GeoIP database in MaxMind mmdb format, repeatable |
+| `--country <CODES>` | Only report proxies exiting in these countries |
+| `--exclude-country <CODES>` | Drop proxies exiting in these countries |
 | `--no-anonymity` | Skip anonymity detection (saves one request) |
 | `--local-ip-url <URL>` | URL used once to learn the local public IP |
 | `--show-credentials` | Print credentials instead of `***:***` |
@@ -105,6 +140,10 @@ proxyforge [OPTIONS] [PROXY]...
 | `--no-summary` | Hide the summary block |
 | `--no-progress` | Hide the progress bar |
 | `--no-color` | Disable ANSI colours |
+| `--serve <BIND>` | Serve the alive pool as a local rotating proxy |
+| `--rotate <N>` | Rotate every N requests (default `1`) |
+| `--rotate-random` | Pick pool members randomly |
+| `--rotate-on-error` | Retry with the next pool member on failure |
 
 ## Output
 
@@ -160,12 +199,52 @@ passwords in the output.
 | `g` / `G` | Jump to the first / last proxy |
 | `f` | Cycle the filter: all → alive → dead |
 | `s` | Cycle the sort order: latency → proxy → status |
+| `e` | Export the visible alive endpoints to `proxyforge-export.txt` |
+| `r` | Re-check the selected proxy |
+| wheel / click | Scroll the results / select a row |
 | `?` | Show or hide the help overlay |
 
 The details pane follows the cursor and shows the full error, the leaked
 forwarding headers and the exit IP. Quitting cancels the remaining checks and
 restores the terminal. Report options such as `--format` and `--output` only
 apply to the non-interactive mode.
+
+## GeoIP enrichment
+
+`--geo-db` loads MaxMind format (`.mmdb`) databases and enriches every exit IP
+with its country, ISO code, ASN and organisation. GeoLite2 Country and ASN work
+out of the box; free alternatives such as the DB-IP Lite databases need no
+registration:
+
+```bash
+curl -O https://download.db-ip.com/free/dbip-country-lite-2026-11.mmdb.gz
+curl -O https://download.db-ip.com/free/dbip-asn-lite-2026-11.mmdb.gz
+gunzip dbip-*.mmdb.gz
+
+proxyforge -i proxies.txt --geo-db dbip-country-lite-2026-11.mmdb \
+  --geo-db dbip-asn-lite-2026-11.mmdb
+```
+
+Reports gain a `Geo` column (`DE · AS3320`) and JSON/CSV gain `country`,
+`country_code`, `asn` and `as_org` fields. `--country TR,DE` and
+`--exclude-country CN` filter by ISO code; without a database loaded those
+filters keep nothing alive.
+
+## Rotating proxy server
+
+`--serve` turns the survivors of a check into a local HTTP proxy that forwards
+every request or `CONNECT` tunnel through the pool:
+
+```bash
+proxyforge -i proxies.txt --alive-only --serve 127.0.0.1:8080 \
+  --rotate 5 --rotate-on-error
+
+curl -x http://127.0.0.1:8080 https://httpbin.org/get
+```
+
+Rotation walks the pool in order every `--rotate N` requests, or picks randomly
+with `--rotate-random`. With `--rotate-on-error` a failing pool member is
+skipped and the next one retries the request. `Ctrl-C` stops the server.
 
 ## Anonymity levels
 
@@ -193,8 +272,10 @@ level `unknown`. Disable the extra lookup with `--no-anonymity`.
 src/
 ├── proxy.rs      # endpoint parsing and redaction
 ├── transport.rs  # HTTP/1.1 client: CONNECT, SOCKS4a, SOCKS5, TLS
-├── checker.rs    # worker pool, retries, latency
+├── checker.rs    # worker pool, retries, latency, protocol detection
 ├── anonymity.rs  # judge payload analysis
+├── geo.rs        # offline GeoIP lookups
+├── serve.rs      # rotating local proxy server
 ├── output.rs     # filtering, sorting, table/JSON/CSV
 ├── tui/          # dashboard state, rendering and event loop
 ├── input.rs      # argument, file and stdin loading

@@ -13,7 +13,12 @@ English documentation: [README.md](README.md)
 ## Özellikler
 
 - HTTP, HTTPS (`CONNECT` üzerinden), SOCKS4/4a, SOCKS5 ve SOCKS5h desteği.
-- Canlı ilerleme, filtreleme ve sıralama sunan etkileşimli terminal panosu (`--tui`).
+- Canlı ilerleme, filtreleme, sıralama, dışa aktarma ve mouse desteğiyle etkileşimli terminal panosu (`--tui`).
+- URL'lerden doğrudan liste çekme (`--input URL`); düz metin, HTML ve JSON içinden ayıklar.
+- Şemasız listeler için protokol otomatik tanıma (`--detect`).
+- Offline GeoIP zenginleştirme (`--geo-db`) ve ülke/ASN filtreleri.
+- Dönel çoklu judge ve yanıt doğrulaması (`--judge`, `--expect`).
+- Canlı havuzu döndüren yerel proxy sunucusu (`--serve`).
 - HTTP (`Proxy-Authorization`) ve SOCKS5 için kullanıcı adı/şifre doğrulaması.
 - İşçi havuzu sayesinde yüksek eşzamanlılık — yavaş bir proxy sırayı tıkamaz.
 - Proxy başına zaman aşımı, isteğe bağlı yeniden deneme ve doğru gecikme ölçümü.
@@ -25,6 +30,9 @@ English documentation: [README.md](README.md)
   ölçülür.
 
 ## Kurulum
+
+Her [sürümden](https://github.com/Shidori5417/proxyforge/releases) Linux, macOS
+ve Windows için derlenmiş binary'ler indirilebilir.
 
 Güncel bir kararlı Rust sürümü gerekir (1.85+).
 
@@ -39,6 +47,19 @@ Veya release derleyin:
 ```bash
 cargo build --release
 ./target/release/proxyforge --help
+```
+
+Docker:
+
+```bash
+docker build -t proxyforge https://github.com/Shidori5417/proxyforge.git
+docker run --rm -i proxyforge --input - --quiet < proxies.txt
+```
+
+Kabuk tamamlamaları:
+
+```bash
+proxyforge completions bash      # ayrıca zsh, fish, elvish, powershell
 ```
 
 ## Hızlı başlangıç
@@ -56,6 +77,14 @@ proxyforge -i proxies.txt --alive-only --max-latency 800 \
 
 # Listeyi borudan al, stdout'a sadece uç noktaları yaz
 cat proxies.txt | proxyforge -i - --quiet > alive.txt
+
+# Listeleri doğrudan web'den çek, sadece Türkiye çıkışlarını tut
+proxyforge -i https://example.com/proxies.txt --geo-db GeoLite2-Country.mmdb \
+  --geo-db GeoLite2-ASN.mmdb --country tr --alive-only
+
+# Şemasız bir listeyi kontrol et, sonra sağ kalanları yerel döndürücü olarak sun
+proxyforge -i plain.txt --detect --serve 127.0.0.1:8080 --rotate-on-error
+curl -x http://127.0.0.1:8080 https://httpbin.org/get
 ```
 
 ## Girdi biçimleri
@@ -85,8 +114,8 @@ proxyforge [SEÇENEKLER] [PROXY]...
 
 | Seçenek | Açıklama |
 | --- | --- |
-| `-i, --input <DOSYA>` | Uç noktaları dosyadan oku; `-` stdin demektir |
-| `-j, --judge <URL>` | Her proxy üzerinden istenen URL (varsayılan `https://httpbin.org/get`) |
+| `-i, --input <DOSYA/URL>` | Uç noktaları dosya, URL veya stdin'den oku; tekrarlanabilir |
+| `-j, --judge <URL>` | Her proxy üzerinden istenen judge URL'si; tekrarlanabilir |
 | `-c, --concurrency <N>` | Paralel kontrol sayısı (varsayılan `100`) |
 | `-t, --timeout <SN>` | Proxy başına zaman aşımı (varsayılan `8`) |
 | `-r, --retries <N>` | Başarısızlıktan sonra ek deneme sayısı (varsayılan `0`) |
@@ -95,8 +124,13 @@ proxyforge [SEÇENEKLER] [PROXY]...
 | `--alive-only` | Sadece yanıt veren proxy'leri raporla |
 | `--max-latency <MS>` | Bundan yavaş proxy'leri ele |
 | `--min-anonymity <SEVİYE>` | `transparent`, `anonymous` veya `elite` |
+| `--expect <METİN>` | Judge yanıtı bu metni içermiyorsa proxy'yi ölü say |
+| `--detect` | Şemasız uç noktalar için HTTP/SOCKS5/SOCKS4dene |
 | `--protocols <LİSTE>` | Sadece bu protokolleri kontrol et (virgülle) |
 | `--sort <SIRA>` | `latency` (varsayılan), `proxy` veya `status` |
+| `--geo-db <DOSYA>` | MaxMind mmdb biçiminde offline GeoIP veritabanı; tekrarlanabilir |
+| `--country <KODLAR>` | Sadece bu ülkelerden çıkan proxy'leri raporla |
+| `--exclude-country <KODLAR>` | Bu ülkelerden çıkan proxy'leri ele |
 | `--no-anonymity` | Anonimlik tespitini atla (bir istek tasarrufu) |
 | `--local-ip-url <URL>` | Yerel genel IP'yi öğrenmek için bir kez kullanılan URL |
 | `--show-credentials` | `***:***` yerine kimlik bilgilerini yazdır |
@@ -105,6 +139,10 @@ proxyforge [SEÇENEKLER] [PROXY]...
 | `--no-summary` | Özet bloğunu gizle |
 | `--no-progress` | İlerleme çubuğunu gizle |
 | `--no-color` | ANSI renklerini kapat |
+| `--serve <ADRES>` | Canlı havuzu yerel dönen proxy olarak sun |
+| `--rotate <N>` | Her N istekte bir döndür (varsayılan `1`) |
+| `--rotate-random` | Havuz üyelerini rastgele seç |
+| `--rotate-on-error` | Hata durumunda sıradaki havuz üyesiyle yeniden dene |
 
 ## Çıktı
 
@@ -160,12 +198,52 @@ CSV aynı alanları kullanır. Kimlik bilgilerini çıktıda tutmak için
 | `g` / `G` | İlk / son proxy'ye git |
 | `f` | Filtreyi değiştir: all → alive → dead |
 | `s` | Sıralamayı değiştir: latency → proxy → status |
+| `e` | Görünen canlı uç noktaları `proxyforge-export.txt`'e yaz |
+| `r` | Seçili proxy'yi yeniden kontrol et |
+| tekerlek / tıklama | Sonuçları kaydır / satır seç |
 | `?` | Yardım penceresini aç/kapat |
 
 Ayrıntı panosu imleci takip eder; tam hatayı, sızan yönlendirme başlıklarını ve
 çıkış IP'sini gösterir. Çıkış kalan kontrolleri iptal eder ve terminali eski
 hâline döndürür. `--format` ve `--output` gibi rapor seçenekleri yalnızca
 etkileşimli olmayan modda geçerlidir.
+
+## GeoIP zenginleştirme
+
+`--geo-db`, MaxMind biçimindeki (`.mmdb`) veritabanlarını yükler ve her çıkış
+IP'sine ülke, ISO kodu, ASN ve kuruluş bilgisini ekler. GeoLite2 Country ve ASN
+kutudan çıkar; kayıt gerektirmeyen DB-IP Lite gibi ücretsiz alternatifler de
+çalışır:
+
+```bash
+curl -O https://download.db-ip.com/free/dbip-country-lite-2026-11.mmdb.gz
+curl -O https://download.db-ip.com/free/dbip-asn-lite-2026-11.mmdb.gz
+gunzip dbip-*.mmdb.gz
+
+proxyforge -i proxies.txt --geo-db dbip-country-lite-2026-11.mmdb \
+  --geo-db dbip-asn-lite-2026-11.mmdb
+```
+
+Raporlara `Geo` sütunu (`DE · AS3320`), JSON/CSV çıktısına `country`,
+`country_code`, `asn` ve `as_org` alanları eklenir. `--country TR,DE` ve
+`--exclude-country CN` ISO koduna göre filtreler; veritabanı yüklenmediğinde
+bu filtreler hiçbir proxy'yi geçirmeyecek şekilde davranır.
+
+## Dönen proxy sunucusu
+
+`--serve`, bir kontrolün sağ kalanlarını her isteği veya `CONNECT` tünelini
+havuzdan ileten yerel bir HTTP proxy'ye dönüştürür:
+
+```bash
+proxyforge -i proxies.txt --alive-only --serve 127.0.0.1:8080 \
+  --rotate 5 --rotate-on-error
+
+curl -x http://127.0.0.1:8080 https://httpbin.org/get
+```
+
+Dönme, her `--rotate N` istekte sırayla ilerler; `--rotate-random` rastgele
+seçer. `--rotate-on-error` ile başarısız üye atlanır ve sıradaki isteği yeniden
+dener. `Ctrl-C` sunucuyu durdurur.
 
 ## Anonimlik seviyeleri
 
@@ -193,8 +271,10 @@ Tespit için istek başlıklarını yansıtan bir judge gerekir; varsayılan
 src/
 ├── proxy.rs      # uç nokta ayrıştırma ve maskeleme
 ├── transport.rs  # HTTP/1.1 istemcisi: CONNECT, SOCKS4a, SOCKS5, TLS
-├── checker.rs    # işçi havuzu, yeniden deneme, gecikme
+├── checker.rs    # işçi havuzu, yeniden deneme, gecikme, protokol tespiti
 ├── anonymity.rs  # judge yanıtı analizi
+├── geo.rs        # offline GeoIP sorguları
+├── serve.rs      # dönen yerel proxy sunucusu
 ├── output.rs     # filtreleme, sıralama, tablo/JSON/CSV
 ├── tui/          # pano durumu, çizim ve olay döngüsü
 ├── input.rs      # argüman, dosya ve stdin yükleme
