@@ -128,6 +128,22 @@ pub struct Cli {
     #[arg(long)]
     pub tui: bool,
 
+    /// After the check, serve the alive pool as a local rotating proxy
+    #[arg(long, value_name = "BIND")]
+    pub serve: Option<String>,
+
+    /// Rotate to the next pool member every N requests (with --serve)
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub rotate: usize,
+
+    /// Pick pool members randomly instead of in order
+    #[arg(long)]
+    pub rotate_random: bool,
+
+    /// On failure, try the next pool member
+    #[arg(long)]
+    pub rotate_on_error: bool,
+
     /// Print one endpoint per line, without table borders or summary
     #[arg(short, long)]
     pub quiet: bool,

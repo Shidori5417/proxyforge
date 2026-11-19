@@ -5,8 +5,8 @@
 //! forwarded through the next pool member, either in order or at random.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -45,10 +45,7 @@ impl ServeState {
         let length = self.pool.len().max(1);
         let index = if self.config.random {
             // Cheap pseudo randomisation without a dependency.
-            served
-                .wrapping_add(attempt)
-                .wrapping_mul(2654435761)
-                % length
+            served.wrapping_add(attempt).wrapping_mul(2654435761) % length
         } else {
             (served / self.config.rotate.max(1) + attempt) % length
         };
@@ -117,8 +114,7 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_connect_target(&uri)?;
-        let mut upstream = connect_upstream(state, &host, port, Tunnel::Yes, "", &[], &[])
-            .await?;
+        let mut upstream = connect_upstream(state, &host, port, Tunnel::Yes, "", &[], &[]).await?;
         client
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
             .await?;
@@ -283,7 +279,12 @@ fn parse_connect_target(uri: &str) -> Result<(String, u16)> {
     let port: u16 = port
         .parse()
         .with_context(|| format!("malformed CONNECT target `{uri}`"))?;
-    Ok((host.trim_start_matches('[').trim_end_matches(']').to_string(), port))
+    Ok((
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string(),
+        port,
+    ))
 }
 
 /// Parses an absolute-form request URI into a [`Target`].

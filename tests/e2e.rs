@@ -18,6 +18,7 @@ use proxyforge::checker::{CheckSettings, check_proxy};
 use proxyforge::cli::Cli;
 use proxyforge::input;
 use proxyforge::proxy::{Protocol, Proxy};
+use proxyforge::serve::{self, ServeConfig};
 use proxyforge::transport::{self, Target};
 
 /// Accepts connections forever and runs `handler` for each of them.
@@ -635,4 +636,90 @@ async fn detect_reports_failure_on_dead_ports() {
     let result = check_proxy(&bare, &settings).await;
     assert!(!result.alive);
     assert!(result.error.unwrap().contains("connect"));
+}
+
+#[tokio::test]
+async fn serve_forwards_requests_through_the_pool() {
+    let judge = spawn_judge(Vec::new()).await;
+    let upstream = spawn_http_proxy().await;
+
+    let config = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        rotate: 1,
+        random: false,
+        rotate_on_error: true,
+    };
+    let pool = vec![Proxy::new(Protocol::Http, "127.0.0.1", upstream.port())];
+    let (address, task) = serve::start(pool, config, Duration::from_secs(3))
+        .await
+        .unwrap();
+
+    let target = Target::parse(&format!("http://{judge}/get")).unwrap();
+    let entry = Proxy::new(Protocol::Http, "127.0.0.1", address.port());
+
+    for _ in 0..2 {
+        let response = transport::get(&entry, &target, Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert!(response.text().contains("203.0.113.7"));
+    }
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_rotates_past_a_dead_proxy() {
+    let judge = spawn_judge(Vec::new()).await;
+    let upstream = spawn_http_proxy().await;
+
+    let config = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        rotate: 1,
+        random: false,
+        rotate_on_error: true,
+    };
+    let pool = vec![
+        Proxy::new(Protocol::Http, "127.0.0.1", 1),
+        Proxy::new(Protocol::Http, "127.0.0.1", upstream.port()),
+    ];
+    let (address, task) = serve::start(pool, config, Duration::from_secs(3))
+        .await
+        .unwrap();
+
+    let target = Target::parse(&format!("http://{judge}/get")).unwrap();
+    let entry = Proxy::new(Protocol::Http, "127.0.0.1", address.port());
+    let response = transport::get(&entry, &target, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_rewrites_requests_for_socks_pools() {
+    let judge = spawn_judge(Vec::new()).await;
+    let upstream = spawn_socks5(None).await;
+
+    let config = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        rotate: 1,
+        random: false,
+        rotate_on_error: false,
+    };
+    let pool = vec![Proxy::new(Protocol::Socks5, "127.0.0.1", upstream.port())];
+    let (address, task) = serve::start(pool, config, Duration::from_secs(3))
+        .await
+        .unwrap();
+
+    let target = Target::parse(&format!("http://{judge}/get")).unwrap();
+    let entry = Proxy::new(Protocol::Http, "127.0.0.1", address.port());
+    let response = transport::get(&entry, &target, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert!(response.text().contains("203.0.113.7"));
+
+    task.abort();
 }

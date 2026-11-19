@@ -15,6 +15,7 @@ use proxyforge::geo::GeoDb;
 use proxyforge::input;
 use proxyforge::output::Report;
 use proxyforge::report::CheckResult;
+use proxyforge::serve::{self, ServeConfig};
 use proxyforge::transport::{Target, get_direct};
 use proxyforge::tui::{self, TuiConfig};
 
@@ -28,6 +29,10 @@ async fn run(cli: Cli) -> Result<()> {
     let loaded = input::load(&cli).await?;
     for warning in loaded.warnings() {
         eprintln!("warning: {warning}");
+    }
+
+    if cli.tui && cli.serve.is_some() {
+        bail!("--tui and --serve cannot be combined");
     }
 
     let mut proxies = loaded.proxies;
@@ -44,6 +49,10 @@ async fn run(cli: Cli) -> Result<()> {
     let mut judges = Vec::with_capacity(cli.judge.len());
     for url in &cli.judge {
         judges.push(Target::parse(url).with_context(|| format!("invalid judge URL `{url}`"))?);
+    }
+
+    if cli.tui && cli.serve.is_some() {
+        bail!("--tui and --serve cannot be combined: the dashboard cannot host the rotator");
     }
 
     let local_ip = if cli.no_anonymity {
@@ -140,6 +149,14 @@ async fn run(cli: Cli) -> Result<()> {
         bar.finish_and_clear();
     }
 
+    // The pool behind --serve: every proxy that survived the check.
+    let pool: Vec<proxyforge::proxy::Proxy> = results
+        .iter()
+        .filter(|result| result.alive)
+        .map(|result| result.proxy.clone())
+        .collect();
+    let pool_size = pool.len();
+
     let report = Report::build(results, &cli, started.elapsed());
     write_report(&cli, &report.render(&cli)?)?;
 
@@ -150,6 +167,30 @@ async fn run(cli: Cli) -> Result<()> {
     if interrupted {
         eprintln!("interrupted: reporting partial results");
         std::process::exit(130);
+    }
+
+    if let Some(bind) = &cli.serve {
+        let config = ServeConfig {
+            bind: bind
+                .parse()
+                .with_context(|| format!("invalid --serve address `{bind}`"))?,
+            rotate: cli.rotate.max(1),
+            random: cli.rotate_random,
+            rotate_on_error: cli.rotate_on_error,
+        };
+
+        let (address, server) = serve::start(pool, config, cli.timeout_duration())
+            .await
+            .context("cannot start the rotating proxy server")?;
+
+        if !cli.quiet {
+            eprintln!("\nserving {pool_size} proxies on {address} · Ctrl-C to stop");
+        }
+        let _ = tokio::signal::ctrl_c().await;
+        server.abort();
+        if !cli.quiet {
+            eprintln!("stopped");
+        }
     }
 
     Ok(())
