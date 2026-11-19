@@ -84,6 +84,8 @@ pub struct Proxy {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// True when the input carried no scheme and the protocol was assumed.
+    pub inferred: bool,
 }
 
 impl Proxy {
@@ -94,7 +96,15 @@ impl Proxy {
             port,
             username: None,
             password: None,
+            inferred: false,
         }
+    }
+
+    /// Returns a copy speaking a different protocol.
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self.inferred = false;
+        self
     }
 
     pub fn with_credentials(
@@ -186,9 +196,9 @@ impl std::str::FromStr for Proxy {
         }
 
         // Split an optional scheme prefix.
-        let (protocol, rest) = match cleaned.split_once("://") {
-            Some((scheme, rest)) => (parse_scheme(scheme)?, rest),
-            None => (Protocol::Http, cleaned),
+        let (protocol, rest, inferred) = match cleaned.split_once("://") {
+            Some((scheme, rest)) => (parse_scheme(scheme)?, rest, false),
+            None => (Protocol::Http, cleaned, true),
         };
 
         // Drop any URL path, query or fragment pasted by accident.
@@ -213,6 +223,7 @@ impl std::str::FromStr for Proxy {
         }
 
         let mut proxy = Proxy::new(protocol, host, port);
+        proxy.inferred = inferred;
         if let Some(creds) = credentials {
             if creds.is_empty() {
                 return Err(ParseProxyError::InvalidCredentials);
@@ -404,6 +415,20 @@ mod tests {
         let proxy = parse("http://1.2.3.4:8080/some/path?q=1");
         assert_eq!(proxy.host, "1.2.3.4");
         assert_eq!(proxy.port, 8080);
+    }
+
+    #[test]
+    fn bare_endpoints_are_marked_as_inferred() {
+        assert!(parse("1.2.3.4:8080").inferred);
+        assert!(!parse("http://1.2.3.4:8080").inferred);
+        assert!(!parse("socks5://1.2.3.4:1080").inferred);
+    }
+
+    #[test]
+    fn with_protocol_switches_and_marks_as_explicit() {
+        let proxy = parse("1.2.3.4:8080").with_protocol(Protocol::Socks5);
+        assert_eq!(proxy.protocol, Protocol::Socks5);
+        assert!(!proxy.inferred);
     }
 
     #[test]

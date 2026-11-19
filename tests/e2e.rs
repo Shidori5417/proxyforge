@@ -191,8 +191,10 @@ async fn spawn_socks4() -> SocketAddr {
     spawn(|mut stream| async move {
         let mut head = [0u8; 8];
         stream.read_exact(&mut head).await.unwrap();
-        assert_eq!(head[0], 0x04);
-        assert_eq!(head[1], 0x01);
+        if head[0] != 0x04 || head[1] != 0x01 {
+            // Not a SOCKS4 request (protocol detection probes us too); drop it.
+            return;
+        }
         let port = u16::from_be_bytes([head[2], head[3]]);
 
         let mut user = Vec::new();
@@ -238,7 +240,10 @@ async fn spawn_socks5(credentials: Option<(&'static str, &'static str)>) -> Sock
     spawn(move |mut stream| async move {
         let mut greeting = [0u8; 2];
         stream.read_exact(&mut greeting).await.unwrap();
-        assert_eq!(greeting[0], 0x05);
+        if greeting[0] != 0x05 {
+            // Not a SOCKS5 greeting (protocol detection probes us too).
+            return;
+        }
         let mut methods = vec![0u8; greeting[1] as usize];
         stream.read_exact(&mut methods).await.unwrap();
 
@@ -270,8 +275,9 @@ async fn spawn_socks5(credentials: Option<(&'static str, &'static str)>) -> Sock
 
         let mut request = [0u8; 4];
         stream.read_exact(&mut request).await.unwrap();
-        assert_eq!(request[0], 0x05);
-        assert_eq!(request[1], 0x01);
+        if request[0] != 0x05 || request[1] != 0x01 {
+            return;
+        }
 
         let host = match request[3] {
             0x01 => {
@@ -320,6 +326,7 @@ fn settings(judge: SocketAddr) -> CheckSettings {
         timeout: Duration::from_secs(3),
         retries: 0,
         expect: None,
+        detect: false,
         anonymity: true,
         local_ip: Some("198.51.100.1".into()),
     }
@@ -570,4 +577,61 @@ async fn missing_expect_text_marks_the_proxy_dead() {
     let result = check_proxy(&proxy(Protocol::Http, address), &settings).await;
     assert!(!result.alive);
     assert!(result.error.unwrap().contains("missing"));
+}
+
+#[tokio::test]
+async fn detect_finds_http_on_bare_endpoints() {
+    let judge = spawn_judge(Vec::new()).await;
+    let address = spawn_http_proxy().await;
+
+    let mut settings = settings(judge);
+    settings.detect = true;
+    let bare: Proxy = format!("127.0.0.1:{}", address.port()).parse().unwrap();
+    assert!(bare.inferred);
+
+    let result = check_proxy(&bare, &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
+    assert_eq!(result.proxy.protocol, Protocol::Http);
+}
+
+#[tokio::test]
+async fn detect_finds_socks5_on_bare_endpoints() {
+    let judge = spawn_judge(Vec::new()).await;
+    let address = spawn_socks5(None).await;
+
+    let mut settings = settings(judge);
+    settings.detect = true;
+    let bare: Proxy = format!("127.0.0.1:{}", address.port()).parse().unwrap();
+
+    let result = check_proxy(&bare, &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
+    assert_eq!(result.proxy.protocol, Protocol::Socks5);
+}
+
+#[tokio::test]
+async fn detect_finds_socks4_on_bare_endpoints() {
+    let judge = spawn_judge(Vec::new()).await;
+    let address = spawn_socks4().await;
+
+    let mut settings = settings(judge);
+    settings.detect = true;
+    let bare: Proxy = format!("127.0.0.1:{}", address.port()).parse().unwrap();
+
+    let result = check_proxy(&bare, &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
+    assert_eq!(result.proxy.protocol, Protocol::Socks4);
+}
+
+#[tokio::test]
+async fn detect_reports_failure_on_dead_ports() {
+    let judge = spawn_judge(Vec::new()).await;
+
+    let mut settings = settings(judge);
+    settings.detect = true;
+    settings.timeout = Duration::from_millis(300);
+    let bare: Proxy = "127.0.0.1:1".parse().unwrap();
+
+    let result = check_proxy(&bare, &settings).await;
+    assert!(!result.alive);
+    assert!(result.error.unwrap().contains("connect"));
 }

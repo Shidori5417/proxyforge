@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, value_name = "TEXT")]
     pub expect: Option<String>,
 
+    /// Probe schemesless endpoints for HTTP, SOCKS5 and SOCKS4 support
+    #[arg(long)]
+    pub detect: bool,
+
     /// Do not classify proxies by anonymity
     #[arg(long)]
     pub no_anonymity: bool,

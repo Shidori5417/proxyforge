@@ -61,6 +61,7 @@ async fn run(cli: Cli) -> Result<()> {
         timeout: cli.timeout_duration(),
         retries: cli.retries,
         expect: cli.expect.clone(),
+        detect: cli.detect,
         anonymity: !cli.no_anonymity,
         local_ip,
     });
