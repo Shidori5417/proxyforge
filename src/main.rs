@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let loaded = input::load(&cli)?;
+    let loaded = input::load(&cli).await?;
     for warning in loaded.warnings() {
         eprintln!("warning: {warning}");
     }

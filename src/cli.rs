@@ -27,9 +27,9 @@ pub struct Cli {
     #[arg(value_name = "PROXY")]
     pub proxies: Vec<String>,
 
-    /// Read proxies from a file, one per line (`-` reads stdin)
-    #[arg(short, long, value_name = "FILE")]
-    pub input: Option<PathBuf>,
+    /// Read proxies from files or URLs; `-` reads stdin (repeatable)
+    #[arg(short, long, value_name = "FILE_OR_URL")]
+    pub input: Vec<String>,
 
     /// URL requested through every proxy to prove it works
     #[arg(

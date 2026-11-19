@@ -11,8 +11,12 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+use clap::Parser as _;
+
 use proxyforge::anonymity::AnonymityLevel;
 use proxyforge::checker::{CheckSettings, check_proxy};
+use proxyforge::cli::Cli;
+use proxyforge::input;
 use proxyforge::proxy::{Protocol, Proxy};
 use proxyforge::transport::{self, Target};
 
@@ -94,6 +98,21 @@ async fn spawn_judge(extra_headers: Vec<(String, String)>) -> SocketAddr {
             let mut stream = reader.into_inner();
             let _ = stream.write_all(response.as_bytes()).await;
         }
+    })
+    .await
+}
+
+/// Serves a raw page containing proxy endpoints, like a public list site.
+async fn spawn_list_page(body: &'static str) -> SocketAddr {
+    spawn(move |stream| async move {
+        let mut reader = BufReader::new(stream);
+        let (_line, _headers) = read_head(&mut reader).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = reader.into_inner();
+        let _ = stream.write_all(response.as_bytes()).await;
     })
     .await
 }
@@ -467,4 +486,41 @@ async fn cli_writes_a_json_report() {
         report[0]["proxy"],
         format!("http://127.0.0.1:{}", address.port())
     );
+}
+
+#[tokio::test]
+async fn scrapes_proxies_from_a_remote_list() {
+    let proxy_addr = spawn_http_proxy().await;
+    let judge = spawn_judge(Vec::new()).await;
+    let body: &'static str = Box::leak(
+        format!(
+            "<html><td>1.2.3.4:8080</td><td>http://user:pass@127.0.0.1:{}</td></html>",
+            proxy_addr.port()
+        )
+        .into_boxed_str(),
+    );
+    let page = spawn_list_page(body).await;
+
+    let cli = Cli::parse_from(["proxyforge", "--input", &format!("http://{page}/list")]);
+    let outcome = input::load(&cli).await.unwrap();
+
+    assert_eq!(outcome.scraped, 2);
+    assert_eq!(outcome.proxies.len(), 2);
+    assert!(
+        outcome
+            .proxies
+            .iter()
+            .any(|proxy| proxy.port == proxy_addr.port())
+    );
+
+    // The scraped proxy really works end to end.
+    let mut settings = settings(judge);
+    settings.anonymity = false;
+    let scraped = outcome
+        .proxies
+        .iter()
+        .find(|proxy| proxy.port == proxy_addr.port())
+        .unwrap();
+    let result = check_proxy(scraped, &settings).await;
+    assert!(result.alive, "error: {:?}", result.error);
 }
