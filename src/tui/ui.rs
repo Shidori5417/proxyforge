@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, TableSt
 use crate::anonymity::AnonymityLevel;
 use crate::report::CheckResult;
 
-use super::model::Dashboard;
+use super::model::{Dashboard, Geometry};
 
 /// Static information shown around the live results.
 pub struct View<'a> {
@@ -18,19 +18,28 @@ pub struct View<'a> {
     pub show_credentials: bool,
 }
 
-const HINTS: &str = " q quit · ↑↓/jk move · PgUp/PgDn page · f filter · s sort · ? help ";
+const HINTS: &str = " q quit · ↑↓/jk move · f filter · s sort · e export · r recheck · ? help ";
 const HELP: &[(&str, &str)] = &[
     ("q / Esc", "quit the dashboard"),
     ("? ", "toggle this help"),
+    (
+        "e",
+        "export the visible alive endpoints to proxyforge-export.txt",
+    ),
+    ("r", "re-check the selected proxy"),
     ("↑ / k", "select previous proxy"),
     ("↓ / j", "select next proxy"),
     ("PgUp/PgDn", "move one page"),
     ("g / G", "first / last proxy"),
     ("f", "cycle filter: all → alive → dead"),
     ("s", "cycle sort: latency → proxy → status"),
+    ("e", "export alive rows to proxyforge-export.txt"),
+    ("r", "re-check the selected proxy"),
+    ("wheel", "scroll the results"),
+    ("click", "select a row"),
 ];
 
-pub fn draw(frame: &mut Frame, app: &Dashboard, view: &View) {
+pub fn draw(frame: &mut Frame, app: &mut Dashboard, view: &View) {
     let area = frame.area();
     let [header, body, details, footer] = Layout::vertical([
         Constraint::Length(3),
@@ -43,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &Dashboard, view: &View) {
     draw_header(frame, app, view, header);
     draw_results(frame, app, view, body);
     draw_details(frame, app, view, details);
-    draw_footer(frame, footer);
+    draw_footer(frame, app, footer);
 
     if app.help {
         draw_help(frame, area);
@@ -88,7 +97,7 @@ fn draw_header(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
     frame.render_widget(gauge, area);
 }
 
-fn draw_results(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
+fn draw_results(frame: &mut Frame, app: &mut Dashboard, view: &View, area: Rect) {
     let rows = app.visible();
     let title = format!(
         " results · filter: {} · sort: {} · {} shown ",
@@ -152,6 +161,18 @@ fn draw_results(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
 
     let mut state = TableState::new().with_selected(Some(app.selected_index()));
     frame.render_stateful_widget(table, area, &mut state);
+
+    // Remember where the table is and how far it scrolled, so mouse clicks
+    // can be mapped back to results.
+    app.set_table_geometry(
+        *state.offset_mut(),
+        Geometry {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        },
+    );
 }
 
 fn row(result: &CheckResult, show_credentials: bool) -> Row<'static> {
@@ -254,11 +275,17 @@ fn draw_details(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect) {
-    frame.render_widget(
-        Paragraph::new(HINTS).style(Style::new().fg(Color::DarkGray)),
-        area,
-    );
+fn draw_footer(frame: &mut Frame, app: &Dashboard, area: Rect) {
+    match &app.notice {
+        Some(notice) => frame.render_widget(
+            Paragraph::new(format!(" {notice}")).style(Style::new().fg(Color::Yellow)),
+            area,
+        ),
+        None => frame.render_widget(
+            Paragraph::new(HINTS).style(Style::new().fg(Color::DarkGray)),
+            area,
+        ),
+    }
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -354,7 +381,8 @@ mod tests {
             workers: 100,
             show_credentials: false,
         };
-        terminal.draw(|frame| draw(frame, app, &view)).unwrap();
+        let borrowed = &mut *app;
+        terminal.draw(|frame| draw(frame, borrowed, &view)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let mut screen = String::new();

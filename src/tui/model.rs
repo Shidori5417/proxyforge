@@ -42,6 +42,15 @@ impl Filter {
     }
 }
 
+/// Where the results table sits on screen, so mouse clicks can map to rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Geometry {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
 /// Live view of a running (or finished) check batch.
 #[derive(Debug)]
 pub struct Dashboard {
@@ -55,6 +64,12 @@ pub struct Dashboard {
     finished_at: Option<Duration>,
     /// Whether the help overlay is visible.
     pub help: bool,
+    /// Transient message shown in the footer, e.g. export results.
+    pub notice: Option<String>,
+    /// Table position on screen, kept up to date by the renderer.
+    geometry: Geometry,
+    /// First visible row of the table, kept up to date by the renderer.
+    table_offset: usize,
 }
 
 impl Dashboard {
@@ -68,14 +83,25 @@ impl Dashboard {
             started: Instant::now(),
             finished_at: None,
             help: false,
+            notice: None,
+            geometry: Geometry::default(),
+            table_offset: 0,
         }
     }
 
-    /// Adds a result that arrived from a worker.
+    /// Adds a result that arrived from a worker, or replaces the previous
+    /// result for the same endpoint (used by the re-check key).
     pub fn push(&mut self, result: CheckResult) {
         if self.selected.is_none() {
             self.selected = Some(result.proxy.key());
         }
+
+        let key = result.proxy.key();
+        if let Some(position) = self.results.iter().position(|r| r.proxy.key() == key) {
+            self.results[position] = result;
+            return;
+        }
+
         self.results.push(result);
         if self.finished_at.is_none() && self.checked() == self.total {
             self.finished_at = Some(self.started.elapsed());
@@ -209,6 +235,61 @@ impl Dashboard {
 
     pub fn toggle_help(&mut self) {
         self.help = !self.help;
+    }
+
+    pub fn notice(&mut self, message: impl Into<String>) {
+        self.notice = Some(message.into());
+    }
+
+    /// The message currently shown in the footer.
+    pub fn current_notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
+    /// Selects the visible row at `index`, clamped to the list.
+    pub fn select_visible_index(&mut self, index: usize) {
+        if let Some(result) = self.visible().get(index) {
+            self.selected = Some(result.proxy.key());
+        }
+    }
+
+    /// Maps an absolute screen row to a visible result index.
+    pub fn row_at(&self, row: u16) -> Option<usize> {
+        // One border row and one header row sit above the data rows.
+        let first_data_row = self.geometry.y.saturating_add(2);
+        if row < first_data_row || row >= self.geometry.y + self.geometry.height {
+            return None;
+        }
+        let index = self.table_offset + (row - first_data_row) as usize;
+        (index < self.visible_count()).then_some(index)
+    }
+
+    /// Records where the renderer placed the table and how far it scrolled.
+    pub fn set_table_geometry(&mut self, offset: usize, geometry: Geometry) {
+        self.table_offset = offset;
+        self.geometry = geometry;
+    }
+
+    /// Endpoints of the visible alive rows, ready to be written to a file.
+    pub fn export_endpoints(&self, show_credentials: bool) -> String {
+        let mut output = String::new();
+        for result in self.visible() {
+            if !result.alive {
+                continue;
+            }
+            let endpoint = if show_credentials {
+                result.proxy.to_url()
+            } else {
+                result.proxy.redacted()
+            };
+            output.push_str(&endpoint);
+            output.push('\n');
+        }
+        output
     }
 
     fn select_offset(&mut self, delta: isize) {
@@ -406,6 +487,93 @@ mod tests {
 
         app.cycle_filter(); // dead only
         assert_eq!(app.selected().map(|r| r.proxy.port), Some(1));
+    }
+
+    #[test]
+    fn push_replaces_the_previous_result_for_the_same_endpoint() {
+        let mut app = dashboard(2);
+        app.push(alive(1, 10));
+        let rechecked = CheckResult::dead(
+            Proxy::new(Protocol::Http, "10.0.0.1", 1),
+            Duration::from_millis(5),
+            "refused on retry",
+        );
+        app.push(rechecked);
+
+        assert_eq!(app.checked(), 1);
+        assert!(!app.results[0].alive);
+        assert_eq!(app.results[0].proxy.port, 1);
+    }
+
+    #[test]
+    fn export_lists_visible_alive_endpoints() {
+        let mut app = dashboard(3);
+        app.push(alive(1, 10));
+        app.push(dead(2));
+        app.push(alive(3, 20));
+
+        let output = app.export_endpoints(false);
+        assert_eq!(output, "http://10.0.0.1:1\nhttp://10.0.0.1:3\n");
+
+        app.cycle_filter(); // alive only
+        assert_eq!(
+            app.export_endpoints(false),
+            "http://10.0.0.1:1\nhttp://10.0.0.1:3\n"
+        );
+
+        app.cycle_filter(); // dead only
+        assert_eq!(app.export_endpoints(false), "");
+    }
+
+    #[test]
+    fn row_at_maps_screen_rows_to_results() {
+        let mut app = dashboard(2);
+        app.push(alive(1, 10));
+        app.push(alive(2, 20));
+        app.set_table_geometry(
+            0,
+            Geometry {
+                x: 0,
+                y: 5,
+                width: 100,
+                height: 20,
+            },
+        );
+
+        // y = 5 is the top border, y = 6 the header, y = 7 the first row.
+        assert_eq!(app.row_at(5), None);
+        assert_eq!(app.row_at(6), None);
+        assert_eq!(app.row_at(7), Some(0));
+        assert_eq!(app.row_at(8), Some(1));
+        assert_eq!(app.row_at(24), None); // past the table area
+    }
+
+    #[test]
+    fn row_at_honours_the_scroll_offset() {
+        let mut app = dashboard(5);
+        for port in 1..=5 {
+            app.push(alive(port, 10 * port as u64));
+        }
+        app.set_table_geometry(
+            3,
+            Geometry {
+                x: 0,
+                y: 5,
+                width: 100,
+                height: 20,
+            },
+        );
+        assert_eq!(app.row_at(7), Some(3));
+        assert_eq!(app.row_at(8), Some(4));
+    }
+
+    #[test]
+    fn select_visible_index_moves_the_cursor() {
+        let mut app = dashboard(2);
+        app.push(alive(1, 10));
+        app.push(alive(2, 20));
+        app.select_visible_index(1);
+        assert_eq!(app.selected_index(), 1);
     }
 
     #[test]
