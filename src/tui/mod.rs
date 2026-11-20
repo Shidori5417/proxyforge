@@ -1,9 +1,12 @@
 //! Interactive terminal dashboard.
 //!
 //! `--tui` opens a live view of a running batch: results stream in while the
-//! user browses, filters and sorts them. The normal report mode is untouched.
+//! user browses, filters and sorts them. `S` opens a settings panel whose
+//! Enter restarts the batch with the edited options, and `R` re-runs every
+//! dead endpoint with the current settings.
 
 mod model;
+mod settings;
 pub mod ui;
 
 use std::io::{IsTerminal, Stdout};
@@ -29,14 +32,15 @@ use crate::checker::{self, CheckSettings};
 use crate::cli::Sort;
 use crate::proxy::Proxy;
 use crate::report::CheckResult;
+use crate::tui::settings::{Panel, RunSettings};
 
 pub use model::{Dashboard, Filter};
+pub use settings::RunSettings as PublicRunSettings;
 pub use ui::View;
 
 /// Settings the dashboard needs beyond the check options.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
-    pub judge: String,
     pub workers: usize,
     pub show_credentials: bool,
     pub sort: Sort,
@@ -45,11 +49,17 @@ pub struct TuiConfig {
 }
 
 /// What the event handler wants the run loop to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Action {
     Quit,
     Export,
     Recheck,
+    /// Apply edited settings and restart the batch.
+    Apply(RunSettings),
+    /// Open the settings panel.
+    OpenPanel,
+    /// Re-check every dead endpoint.
+    RerunDead,
     Browse,
 }
 
@@ -67,8 +77,8 @@ pub async fn run(
     }
 
     let total = proxies.len();
-    let view = View {
-        judge: &config.judge,
+    let mut view = View {
+        judge: judge_label(&settings),
         workers: config.workers,
         show_credentials: config.show_credentials,
         export_path: config.export_path.clone(),
@@ -78,17 +88,16 @@ pub async fn run(
 
     let (result_sender, mut results) = unbounded_channel();
     let recheck_sender = result_sender.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let _workers = checker::spawn_workers(
-        proxies,
-        Arc::clone(&settings),
-        config.workers,
-        Arc::clone(&cancel),
-        result_sender,
-    );
+
+    // Everything the panel may change lives in these two, so a restart can
+    // simply rebuild the batch from the untouched endpoint list.
+    let mut settings = settings;
+    let mut current = RunSettings::from_settings(&settings, config.workers);
+    let all_proxies = proxies.clone();
+    let mut batch = spawn_batch(proxies, &settings, current.concurrency, &result_sender);
 
     let (event_sender, mut events) = unbounded_channel();
-    spawn_event_reader(event_sender, Arc::clone(&cancel));
+    spawn_event_reader(event_sender, Arc::new(AtomicBool::new(false)));
 
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -96,11 +105,12 @@ pub async fn run(
     let mut results_open = true;
     let mut events_open = true;
     let mut quit = false;
+    let mut panel: Option<Panel> = None;
 
     while !quit {
         tokio::select! {
             _ = ticker.tick() => {
-                session.draw(&mut app, &view)?;
+                session.draw(&mut app, &view, panel.as_ref())?;
             }
             received = results.recv(), if results_open => {
                 match received {
@@ -111,14 +121,49 @@ pub async fn run(
             event = events.recv(), if events_open => {
                 match event {
                     Some(event) => {
-                        let action = handle_event(event, &mut app);
+                        let action = handle_event(event, &mut app, &mut panel, &current);
                         match action {
                             Action::Quit => quit = true,
                             Action::Export => export(&mut app, &view),
                             Action::Recheck => recheck(&mut app, &settings, &recheck_sender),
+                            Action::Apply(edited) => {
+                                match edited.apply(&settings) {
+                                    Ok(applied) => {
+                                        batch.store(true, Ordering::Relaxed);
+                                        settings = Arc::new(applied);
+                                        current = edited;
+                                        app = Dashboard::new(total, config.sort);
+                                        batch = spawn_batch(
+                                            all_proxies.clone(),
+                                            &settings,
+                                            current.concurrency,
+                                            &result_sender,
+                                        );
+                                        view.judge = judge_label(&settings);
+                                        view.workers = current.concurrency;
+                                        app.notice("restarted with the new settings");
+                                    }
+                                    Err(error) => {
+                                        app.notice(format!("cannot apply: {error}"));
+                                    }
+                                }
+                            }
+                            Action::OpenPanel => {
+                                panel = Some(current.clone().panel());
+                            }
+                            Action::RerunDead => {
+                                let dead = app.dead_proxies();
+                                if dead.is_empty() {
+                                    app.notice("no dead endpoint to re-check");
+                                } else {
+                                    let count = dead.len();
+                                    spawn_batch(dead, &settings, current.concurrency, &recheck_sender);
+                                    app.notice(format!("re-checking {count} dead endpoints"));
+                                }
+                            }
                             Action::Browse => {}
                         }
-                        session.draw(&mut app, &view)?;
+                        session.draw(&mut app, &view, panel.as_ref())?;
                     }
                     None => events_open = false,
                 }
@@ -126,8 +171,35 @@ pub async fn run(
         }
     }
 
-    cancel.store(true, Ordering::Relaxed);
+    batch.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Spawns a worker pool over the endpoints and returns its cancel flag.
+fn spawn_batch(
+    proxies: Vec<Proxy>,
+    settings: &Arc<CheckSettings>,
+    concurrency: usize,
+    sender: &UnboundedSender<CheckResult>,
+) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _workers = checker::spawn_workers(
+        proxies,
+        Arc::clone(settings),
+        concurrency.max(1),
+        Arc::clone(&cancel),
+        sender.clone(),
+    );
+    cancel
+}
+
+/// Short label for the header, taken from the first judge.
+fn judge_label(settings: &CheckSettings) -> String {
+    settings
+        .judges
+        .first()
+        .map(|target| target.host_header())
+        .unwrap_or_else(|| "judge".into())
 }
 
 /// Writes the visible alive endpoints to the configured export file.
@@ -189,9 +261,9 @@ impl TerminalSession {
         Ok(Self { terminal })
     }
 
-    fn draw(&mut self, app: &mut Dashboard, view: &View) -> Result<()> {
+    fn draw(&mut self, app: &mut Dashboard, view: &View, panel: Option<&Panel>) -> Result<()> {
         self.terminal
-            .draw(|frame| ui::draw(frame, app, view))
+            .draw(|frame| ui::draw(frame, app, view, panel))
             .context("cannot draw the dashboard")?;
         Ok(())
     }
@@ -249,11 +321,53 @@ fn spawn_event_reader(sender: UnboundedSender<Event>, cancel: Arc<AtomicBool>) {
 }
 
 /// Applies one terminal event to the dashboard and says what to do next.
-fn handle_event(event: Event, app: &mut Dashboard) -> Action {
+fn handle_event(
+    event: Event,
+    app: &mut Dashboard,
+    panel: &mut Option<Panel>,
+    current: &RunSettings,
+) -> Action {
     app.clear_notice();
 
+    // While the settings panel is open, every key edits it. Enter and Esc
+    // close the panel; everything else keeps it open.
+    if panel.is_some() {
+        let mut open = panel.take().expect("checked above");
+        if let Event::Key(key) = event
+            && key.kind == KeyEventKind::Press
+        {
+            return match key.code {
+                // Applying closes the panel; a failed apply reports through
+                // the notice and leaves the dashboard untouched.
+                KeyCode::Enter => Action::Apply(open.snapshot()),
+                KeyCode::Esc => Action::Browse,
+                KeyCode::Up | KeyCode::BackTab => {
+                    open.focus_prev();
+                    *panel = Some(open);
+                    Action::Browse
+                }
+                KeyCode::Down | KeyCode::Tab => {
+                    open.focus_next();
+                    *panel = Some(open);
+                    Action::Browse
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    *panel = Some(open);
+                    Action::Quit
+                }
+                _ => {
+                    open.edit(key);
+                    *panel = Some(open);
+                    Action::Browse
+                }
+            };
+        }
+        *panel = Some(open);
+        return Action::Browse;
+    }
+
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(key, app),
+        Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(key, app, current),
         Event::Mouse(mouse) => {
             handle_mouse(mouse, app);
             Action::Browse
@@ -262,7 +376,7 @@ fn handle_event(event: Event, app: &mut Dashboard) -> Action {
     }
 }
 
-fn handle_key(key: KeyEvent, app: &mut Dashboard) -> Action {
+fn handle_key(key: KeyEvent, app: &mut Dashboard, current: &RunSettings) -> Action {
     match key.code {
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Esc => {
@@ -278,8 +392,13 @@ fn handle_key(key: KeyEvent, app: &mut Dashboard) -> Action {
             app.toggle_help();
             Action::Browse
         }
+        KeyCode::Char('S') => {
+            let _ = current;
+            Action::OpenPanel
+        }
         KeyCode::Char('e') => Action::Export,
         KeyCode::Char('r') => Action::Recheck,
+        KeyCode::Char('R') => Action::RerunDead,
         KeyCode::Char('f') => {
             app.cycle_filter();
             Action::Browse
@@ -333,13 +452,25 @@ fn handle_mouse(mouse: MouseEvent, app: &mut Dashboard) {
 mod tests {
     use super::*;
     use crate::proxy::{Protocol, Proxy};
+    use crate::transport::Target;
     use model::Geometry;
+    use std::time::Duration;
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn dashboard_with(rows: usize) -> (Dashboard, ()) {
+    fn current() -> RunSettings {
+        RunSettings {
+            judges: "https://httpbin.org/get".into(),
+            timeout: 8,
+            concurrency: 100,
+            retries: 0,
+            detect: false,
+        }
+    }
+
+    fn dashboard_with(rows: usize) -> Dashboard {
         let mut app = Dashboard::new(rows, Sort::Latency);
         for port in 1..=rows as u16 {
             app.push(CheckResult::alive(
@@ -348,62 +479,123 @@ mod tests {
                 Some(200),
             ));
         }
-        (app, ())
+        app
     }
 
     #[test]
     fn q_quits() {
-        let (mut app, _) = dashboard_with(0);
+        let mut app = dashboard_with(0);
         assert_eq!(
-            handle_event(press(KeyCode::Char('q')), &mut app),
+            handle_event(press(KeyCode::Char('q')), &mut app, &mut None, &current()),
             Action::Quit
         );
     }
 
     #[test]
     fn escape_closes_help_before_quitting() {
-        let (mut app, _) = dashboard_with(0);
+        let mut app = dashboard_with(0);
         app.toggle_help();
-        assert_eq!(handle_event(press(KeyCode::Esc), &mut app), Action::Browse);
+        assert_eq!(
+            handle_event(press(KeyCode::Esc), &mut app, &mut None, &current()),
+            Action::Browse
+        );
         assert!(!app.help);
-        assert_eq!(handle_event(press(KeyCode::Esc), &mut app), Action::Quit);
+        assert_eq!(
+            handle_event(press(KeyCode::Esc), &mut app, &mut None, &current()),
+            Action::Quit
+        );
     }
 
     #[test]
     fn f_and_s_change_the_view() {
-        let (mut app, _) = dashboard_with(0);
+        let mut app = dashboard_with(0);
         assert_eq!(
-            handle_event(press(KeyCode::Char('f')), &mut app),
+            handle_event(press(KeyCode::Char('f')), &mut app, &mut None, &current()),
             Action::Browse
         );
         assert_eq!(app.filter(), Filter::Alive);
         assert_eq!(
-            handle_event(press(KeyCode::Char('s')), &mut app),
+            handle_event(press(KeyCode::Char('s')), &mut app, &mut None, &current()),
             Action::Browse
         );
         assert_eq!(app.sort(), Sort::Proxy);
     }
 
     #[test]
-    fn e_and_r_request_export_and_recheck() {
-        let (mut app, _) = dashboard_with(0);
+    fn export_recheck_rerun_request_side_effects() {
+        let mut app = dashboard_with(0);
         assert_eq!(
-            handle_event(press(KeyCode::Char('e')), &mut app),
+            handle_event(press(KeyCode::Char('e')), &mut app, &mut None, &current()),
             Action::Export
         );
         assert_eq!(
-            handle_event(press(KeyCode::Char('r')), &mut app),
+            handle_event(press(KeyCode::Char('r')), &mut app, &mut None, &current()),
             Action::Recheck
+        );
+        assert_eq!(
+            handle_event(press(KeyCode::Char('R')), &mut app, &mut None, &current()),
+            Action::RerunDead
         );
     }
 
     #[test]
+    fn shift_s_opens_the_settings_panel() {
+        let mut app = dashboard_with(0);
+        assert_eq!(
+            handle_event(press(KeyCode::Char('S')), &mut app, &mut None, &current()),
+            Action::OpenPanel
+        );
+    }
+
+    #[test]
+    fn panel_keys_edit_fields_instead_of_the_dashboard() {
+        let mut app = dashboard_with(0);
+        let mut panel = Some(current().panel());
+
+        // Moving between fields does not touch the dashboard.
+        assert_eq!(
+            handle_event(press(KeyCode::Down), &mut app, &mut panel, &current()),
+            Action::Browse
+        );
+        let open = panel.as_ref().unwrap();
+        assert_eq!(open.field, 1);
+
+        // ◀ ▶ adjust the focused number.
+        handle_event(press(KeyCode::Right), &mut app, &mut panel, &current());
+        assert_eq!(panel.as_ref().unwrap().settings.timeout, 9);
+
+        // Typing goes into the field, not the proxy list.
+        handle_event(press(KeyCode::Char('5')), &mut app, &mut panel, &current());
+
+        // Enter applies the edited settings.
+        let action = handle_event(press(KeyCode::Enter), &mut app, &mut panel, &current());
+        let Action::Apply(edited) = action else {
+            panic!("expected Apply, got {action:?}");
+        };
+        assert_eq!(edited.timeout, 5);
+    }
+
+    #[test]
+    fn escape_closes_the_panel_without_applying() {
+        let mut app = dashboard_with(0);
+        let mut panel = Some(current().panel());
+        assert_eq!(
+            handle_event(press(KeyCode::Esc), &mut app, &mut panel, &current()),
+            Action::Browse
+        );
+        assert!(panel.is_none());
+    }
+
+    #[test]
     fn navigation_keys_move_the_cursor() {
-        let (mut app, _) = dashboard_with(2);
-        assert_eq!(handle_event(press(KeyCode::Down), &mut app), Action::Browse);
+        let mut app = dashboard_with(2);
+        assert_eq!(
+            handle_event(press(KeyCode::Down), &mut app, &mut None, &current()),
+            Action::Browse
+        );
         assert_eq!(app.selected_index(), 1);
         assert_eq!(
-            handle_event(press(KeyCode::Char('k')), &mut app),
+            handle_event(press(KeyCode::Char('k')), &mut app, &mut None, &current()),
             Action::Browse
         );
         assert_eq!(app.selected_index(), 0);
@@ -411,7 +603,7 @@ mod tests {
 
     #[test]
     fn mouse_wheel_scrolls_and_click_selects() {
-        let (mut app, _) = dashboard_with(2);
+        let mut app = dashboard_with(2);
         app.set_table_geometry(
             0,
             Geometry {
@@ -428,7 +620,10 @@ mod tests {
             row: 10,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(handle_event(scroll_down, &mut app), Action::Browse);
+        assert_eq!(
+            handle_event(scroll_down, &mut app, &mut None, &current()),
+            Action::Browse
+        );
         assert_eq!(app.selected_index(), 1);
 
         let click_first = Event::Mouse(MouseEvent {
@@ -437,15 +632,15 @@ mod tests {
             row: 7,
             modifiers: KeyModifiers::NONE,
         });
-        handle_event(click_first, &mut app);
+        handle_event(click_first, &mut app, &mut None, &current());
         assert_eq!(app.selected_index(), 0);
     }
 
     #[test]
     fn non_key_and_release_events_are_ignored() {
-        let (mut app, _) = dashboard_with(0);
+        let mut app = dashboard_with(0);
         assert_eq!(
-            handle_event(Event::Resize(80, 24), &mut app),
+            handle_event(Event::Resize(80, 24), &mut app, &mut None, &current()),
             Action::Browse
         );
 
@@ -454,14 +649,36 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Release,
         ));
-        assert_eq!(handle_event(release, &mut app), Action::Browse);
+        assert_eq!(
+            handle_event(release, &mut app, &mut None, &current()),
+            Action::Browse
+        );
     }
 
     #[test]
     fn any_event_clears_the_notice() {
-        let (mut app, _) = dashboard_with(0);
+        let mut app = dashboard_with(0);
         app.notice("exported");
-        handle_event(press(KeyCode::Char('j')), &mut app);
+        handle_event(press(KeyCode::Char('j')), &mut app, &mut None, &current());
         assert_eq!(app.current_notice(), None);
+    }
+
+    #[test]
+    fn dead_proxies_feed_the_rerun_action() {
+        let mut app = Dashboard::new(2, Sort::Latency);
+        app.push(CheckResult::alive(
+            Proxy::new(Protocol::Http, "10.0.0.1", 1),
+            Duration::from_millis(10),
+            Some(200),
+        ));
+        app.push(CheckResult::dead(
+            Proxy::new(Protocol::Http, "10.0.0.2", 2),
+            Duration::from_millis(10),
+            "refused",
+        ));
+        let dead = app.dead_proxies();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].port, 2);
+        let _ = Target::parse("http://example.com/");
     }
 }

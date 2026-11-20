@@ -99,12 +99,6 @@ async fn run(cli: Cli) -> Result<()> {
             proxies,
             settings,
             TuiConfig {
-                judge: cli
-                    .judge
-                    .first()
-                    .and_then(|url| Target::parse(url).ok())
-                    .map(|target| target.host_header())
-                    .unwrap_or_else(|| "judge".into()),
                 workers: cli.concurrency as usize,
                 show_credentials: cli.show_credentials,
                 sort: cli.sort,

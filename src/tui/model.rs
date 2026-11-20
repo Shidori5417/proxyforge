@@ -274,6 +274,15 @@ impl Dashboard {
         self.geometry = geometry;
     }
 
+    /// Endpoints of every dead result, for the re-run key.
+    pub fn dead_proxies(&self) -> Vec<crate::proxy::Proxy> {
+        self.results
+            .iter()
+            .filter(|result| !result.alive)
+            .map(|result| result.proxy.clone())
+            .collect()
+    }
+
     /// Endpoints of the visible alive rows, ready to be written to a file.
     pub fn export_endpoints(&self, show_credentials: bool) -> String {
         let mut output = String::new();

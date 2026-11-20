@@ -12,10 +12,11 @@ use crate::anonymity::AnonymityLevel;
 use crate::report::CheckResult;
 
 use super::model::{Dashboard, Geometry};
+use super::settings::{FIELDS, Panel};
 
-/// Static information shown around the live results.
-pub struct View<'a> {
-    pub judge: &'a str,
+/// Information shown around the live results.
+pub struct View {
+    pub judge: String,
     pub workers: usize,
     pub show_credentials: bool,
     pub export_path: String,
@@ -28,6 +29,7 @@ const KEYS: &[(&str, &str)] = &[
     ("s", "sort"),
     ("e", "export"),
     ("r", "recheck"),
+    ("S", "settings"),
     ("?", "help"),
 ];
 const HELP: &[(&str, &str)] = &[
@@ -50,7 +52,7 @@ const HELP: &[(&str, &str)] = &[
     ("click", "select a row"),
 ];
 
-pub fn draw(frame: &mut Frame, app: &mut Dashboard, view: &View) {
+pub fn draw(frame: &mut Frame, app: &mut Dashboard, view: &View, panel: Option<&Panel>) {
     let area = frame.area();
     let [header, body, details, footer] = Layout::vertical([
         Constraint::Length(3),
@@ -67,6 +69,9 @@ pub fn draw(frame: &mut Frame, app: &mut Dashboard, view: &View) {
 
     if app.help {
         draw_help(frame, area);
+    }
+    if let Some(panel) = panel {
+        draw_panel(frame, panel);
     }
 }
 
@@ -340,6 +345,65 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, popup);
 }
 
+/// The settings overlay opened with S.
+fn draw_panel(frame: &mut Frame, panel: &Panel) {
+    let height = FIELDS.len() as u16 + 4;
+    let popup = centered_exact(frame.area(), 62, height);
+    frame.render_widget(Clear, popup);
+
+    let mut lines = vec![Line::from("")];
+    for (index, field) in FIELDS.iter().enumerate() {
+        let focused = index == panel.field;
+        let value = panel.settings.value_of(index);
+        let hint = match field.kind {
+            super::settings::FieldKind::Text => String::new(),
+            _ => "  ◀ ▶".to_string(),
+        };
+
+        let style = if focused {
+            Style::new()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", field.label), style),
+            Span::styled(format!("{value}{hint}"), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter: apply & restart · Esc: cancel · ↑↓: field",
+        Style::new().fg(Color::DarkGray),
+    )));
+
+    let paragraph =
+        Paragraph::new(lines).block(Block::bordered().border_type(BorderType::Rounded).title(
+            Span::styled(
+                " settings ",
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+        ));
+    frame.render_widget(paragraph, popup);
+}
+
+/// A centered box with exact dimensions, used by the settings overlay.
+fn centered_exact(area: Rect, width: u16, height: u16) -> Rect {
+    let x = area
+        .x
+        .saturating_add((area.width.saturating_sub(width)) / 2);
+    let y = area
+        .y
+        .saturating_add((area.height.saturating_sub(height)) / 2);
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
 fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     let vertical = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),
@@ -449,13 +513,15 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let view = View {
-            judge: "httpbin.org/get",
+            judge: "httpbin.org/get".into(),
             workers: 100,
             show_credentials: false,
             export_path: "proxyforge-export.txt".into(),
         };
         let borrowed = &mut *app;
-        terminal.draw(|frame| draw(frame, borrowed, &view)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, borrowed, &view, None))
+            .unwrap();
 
         let buffer = terminal.backend().buffer();
         let mut screen = String::new();

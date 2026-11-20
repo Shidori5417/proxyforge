@@ -95,7 +95,7 @@ impl Target {
         }
     }
 
-    fn absolute_uri(&self) -> String {
+    pub fn absolute_uri(&self) -> String {
         let scheme = if self.tls { "https" } else { "http" };
         format!("{scheme}://{}{}", self.host_header(), self.path)
     }
