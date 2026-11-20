@@ -395,10 +395,10 @@ fn flag_of(code: &str) -> Option<String> {
     let mut chars = code.chars();
     let first = chars.next()?;
     let second = chars.next()?;
-    let base = 'A' as u32;
-    if !(('A'..='Z').contains(&first) && ('A'..='Z').contains(&second)) {
+    if !first.is_ascii_uppercase() || !second.is_ascii_uppercase() {
         return None;
     }
+    let base = 'A' as u32;
     let first = char::from_u32(0x1F1E6 + first as u32 - base)?;
     let second = char::from_u32(0x1F1E6 + second as u32 - base)?;
     Some(format!("{first}{second}"))
