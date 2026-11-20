@@ -9,7 +9,7 @@ use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table};
 use serde::Serialize;
 
 use crate::anonymity::AnonymityLevel;
-use crate::cli::{Cli, Format, Sort};
+use crate::cli::{Cli, Format, SaveFormat, Sort};
 use crate::report::CheckResult;
 
 /// A finished run: the visible results plus aggregate statistics.
@@ -177,6 +177,43 @@ impl Report {
         }
         let bytes = writer.into_inner().context("cannot encode CSV report")?;
         String::from_utf8(bytes).context("CSV report is not valid UTF-8")
+    }
+}
+
+/// Renders only the alive results for `--save`. Credentials are written in
+/// full: the file exists to be fed back into the tool.
+pub fn render_alive(results: &[CheckResult], format: SaveFormat) -> String {
+    let alive: Vec<&CheckResult> = results.iter().filter(|result| result.alive).collect();
+
+    match format {
+        SaveFormat::Endpoints => {
+            let mut output = String::new();
+            for result in alive {
+                output.push_str(&result.proxy.to_url());
+                output.push('\n');
+            }
+            output
+        }
+        SaveFormat::Json => {
+            let rows: Vec<Row> = alive.iter().map(|result| Row::new(result, true)).collect();
+            match serde_json::to_string_pretty(&rows) {
+                Ok(mut text) => {
+                    text.push('\n');
+                    text
+                }
+                Err(_) => String::new(),
+            }
+        }
+        SaveFormat::Csv => {
+            let mut writer = csv::Writer::from_writer(Vec::new());
+            for result in alive {
+                let _ = writer.serialize(Row::new(result, true));
+            }
+            writer
+                .into_inner()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -599,6 +636,29 @@ mod tests {
         assert_eq!(value[0]["country"], "Germany");
         assert_eq!(value[0]["country_code"], "DE");
         assert_eq!(value[0]["asn"], 3320);
+    }
+
+    #[test]
+    fn render_alive_keeps_endpoints_with_credentials() {
+        let mut result = alive(2, 100, "1.1.1.1");
+        result.proxy = Proxy::new(Protocol::Socks5, "10.0.0.1", 1080)
+            .with_credentials("user", Some("secret".into()));
+        let text = render_alive(&[result, dead(1)], SaveFormat::Endpoints);
+        assert_eq!(text, "socks5://user:secret@10.0.0.1:1080\n");
+    }
+
+    #[test]
+    fn render_alive_supports_json_and_csv() {
+        let results = vec![alive(2, 100, "1.1.1.1"), dead(1)];
+
+        let json = render_alive(&results, SaveFormat::Json);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), 1);
+        assert_eq!(value[0]["alive"], true);
+
+        let csv = render_alive(&results, SaveFormat::Csv);
+        assert!(csv.starts_with("proxy,protocol,host,port,alive"));
+        assert_eq!(csv.lines().count(), 2);
     }
 
     #[test]

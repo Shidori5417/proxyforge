@@ -13,7 +13,7 @@ use proxyforge::checker::{self, CheckSettings};
 use proxyforge::cli::{Cli, Command};
 use proxyforge::geo::GeoDb;
 use proxyforge::input;
-use proxyforge::output::Report;
+use proxyforge::output::{Report, render_alive};
 use proxyforge::report::CheckResult;
 use proxyforge::serve::{self, ServeConfig};
 use proxyforge::transport::{Target, get_direct};
@@ -156,12 +156,14 @@ async fn run(cli: Cli) -> Result<()> {
         bar.finish_and_clear();
     }
 
-    // The pool behind --serve: every proxy that survived the check.
-    let pool: Vec<proxyforge::proxy::Proxy> = results
+    // Alive results feed both --save and the pool behind --serve.
+    let alive: Vec<CheckResult> = results
         .iter()
         .filter(|result| result.alive)
-        .map(|result| result.proxy.clone())
+        .cloned()
         .collect();
+    let pool: Vec<proxyforge::proxy::Proxy> =
+        alive.iter().map(|result| result.proxy.clone()).collect();
     let pool_size = pool.len();
 
     let report = Report::build(results, &cli, started.elapsed());
@@ -169,6 +171,10 @@ async fn run(cli: Cli) -> Result<()> {
 
     if !cli.quiet && !cli.no_summary {
         eprintln!("\n{}", report.stats.render());
+    }
+
+    if cli.save.is_some() {
+        save_alive(&cli, &alive)?;
     }
 
     if interrupted {
@@ -200,6 +206,31 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Writes the alive endpoints (or rows) to the `--save` file.
+fn save_alive(cli: &Cli, alive: &[CheckResult]) -> Result<()> {
+    let Some(path) = &cli.save else {
+        return Ok(());
+    };
+
+    let text = render_alive(alive, cli.save_format);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(!cli.save_append)
+        .append(cli.save_append)
+        .open(path)
+        .with_context(|| format!("cannot write `{}`", path))?;
+
+    use std::io::Write as _;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("cannot write `{}`", path))?;
+
+    if !cli.quiet {
+        eprintln!("saved {} alive proxies to {}", alive.len(), path);
+    }
     Ok(())
 }
 

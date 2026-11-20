@@ -104,6 +104,18 @@ pub struct Cli {
     #[arg(short = 'o', long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Write only the alive proxies to a file after the run
+    #[arg(long, value_name = "FILE")]
+    pub save: Option<String>,
+
+    /// Append to the save file instead of overwriting it
+    #[arg(long, requires = "save")]
+    pub save_append: bool,
+
+    /// Format of the saved file (with --save)
+    #[arg(long, value_enum, default_value_t = SaveFormat::Endpoints)]
+    pub save_format: SaveFormat,
+
     /// Only report proxies that responded
     #[arg(long)]
     pub alive_only: bool,
@@ -208,6 +220,17 @@ impl std::fmt::Display for Format {
             Format::Csv => "csv",
         })
     }
+}
+
+/// Content written by `--save`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SaveFormat {
+    /// One endpoint per line, ready to feed back into the tool
+    Endpoints,
+    /// Full JSON array with every field
+    Json,
+    /// Comma separated values with every field
+    Csv,
 }
 
 /// Order in which results are reported.
