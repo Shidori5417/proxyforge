@@ -19,6 +19,8 @@ Türkçe dokümantasyon: [README.tr.md](README.tr.md)
 - Offline GeoIP enrichment (`--geo-db`) with country and ASN filters.
 - Multiple judges with rotation and response verification (`--judge`, `--expect`).
 - Rotating proxy server (`--serve`) that forwards traffic through the alive pool.
+- Saves the survivors with `--save`, as endpoints, JSON or CSV.
+- Settings editable live in the dashboard (`S`), re-running the batch on Enter.
 - Username/password authentication for HTTP (`Proxy-Authorization`) and SOCKS5.
 - High concurrency with a worker pool — a slow proxy never blocks the line.
 - Per-proxy timeout, optional retries and accurate latency measurements.
@@ -78,9 +80,9 @@ proxyforge -i proxies.txt --alive-only --max-latency 800 \
 # Pipe a list in, keep plain endpoints on stdout
 cat proxies.txt | proxyforge -i - --quiet > alive.txt
 
-# Pull lists straight from the web and keep only Turkish exits
+# Pull lists straight from the web, keep only Turkish exits, save them
 proxyforge -i https://example.com/proxies.txt --geo-db GeoLite2-Country.mmdb \
-  --geo-db GeoLite2-ASN.mmdb --country tr --alive-only
+  --geo-db GeoLite2-ASN.mmdb --country tr --save tr.txt
 
 # Check a list with no schemes, then serve the survivors as a local rotator
 proxyforge -i plain.txt --detect --serve 127.0.0.1:8080 --rotate-on-error
@@ -129,6 +131,9 @@ proxyforge [OPTIONS] [PROXY]...
 | `--detect` | Probe schemesless endpoints for HTTP, SOCKS5 and SOCKS4 |
 | `--protocols <LIST>` | Only check these protocols, comma separated |
 | `--sort <ORDER>` | `latency` (default), `proxy` or `status` |
+| `--save <FILE>` | Write only the alive proxies to a file after the run |
+| `--save-append` | Append to the save file instead of overwriting |
+| `--save-format <FMT>` | `endpoints` (default), `json` or `csv` |
 | `--geo-db <FILE>` | Offline GeoIP database in MaxMind mmdb format, repeatable |
 | `--country <CODES>` | Only report proxies exiting in these countries |
 | `--exclude-country <CODES>` | Drop proxies exiting in these countries |
@@ -187,6 +192,20 @@ JSON output is an array of objects:
 CSV uses the same fields. Use `--show-credentials` to keep usernames and
 passwords in the output.
 
+## Saving the survivors
+
+`--save` writes only the proxies that answered, with their detected scheme and
+credentials included, so the file can be fed straight back in:
+
+```bash
+proxyforge -i proxies.txt --detect --save alive.txt
+proxyforge -i alive.txt --alive-only --country tr --save-append tr.txt
+```
+
+`--save-format json` (or `csv`) keeps every field instead. Interrupting with
+`Ctrl-C` still saves everything checked so far, and in the dashboard the `e`
+key writes to the same file.
+
 ## Interactive dashboard
 
 `--tui` opens the live dashboard shown at the top of this page:
@@ -199,9 +218,15 @@ passwords in the output.
 | `g` / `G` | Jump to the first / last proxy |
 | `f` | Cycle the filter: all → alive → dead |
 | `s` | Cycle the sort order: latency → proxy → status |
-| `e` | Export the visible alive endpoints to `proxyforge-export.txt` |
+| `e` | Export the visible alive endpoints to the `--save` file |
 | `r` | Re-check the selected proxy |
+| `R` | Re-check every dead endpoint |
+| `S` | Open the settings panel: judge, timeout, concurrency, retries, detection |
 | wheel / click | Scroll the results / select a row |
+
+Inside the settings panel, `↑↓` pick a field, `◀▶` or digits edit it, `Enter`
+restarts the whole batch with the new values and `Esc` cancels. Invalid input
+is reported in the footer and changes nothing.
 | `?` | Show or hide the help overlay |
 
 The details pane follows the cursor and shows the full error, the leaked

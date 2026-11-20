@@ -6,7 +6,7 @@
 //! dead endpoint with the current settings.
 
 mod model;
-mod settings;
+pub mod settings;
 pub mod ui;
 
 use std::io::{IsTerminal, Stdout};

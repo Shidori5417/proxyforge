@@ -1,6 +1,6 @@
 [package]
 name = "proxyforge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Fast, concurrent proxy checker for HTTP, HTTPS, SOCKS4 and SOCKS5 proxies"

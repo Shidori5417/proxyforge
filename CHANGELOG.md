@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- `--save FILE` writes only the alive proxies after a run, with the detected
+  scheme and credentials included; `--save-format` picks endpoints, JSON or
+  CSV and `--save-append` extends an existing file. Interrupting with `Ctrl-C`
+  still saves what was checked, and the dashboard `e` key writes to the same
+  file.
+- Settings panel in the dashboard: `S` edits the judge URL, timeout,
+  concurrency, retries and protocol detection live; Enter restarts the batch
+  with the new values, Escape cancels and invalid input is reported without
+  changing anything.
+- `R` re-checks every dead endpoint with the current settings.
+- Modernised dashboard: rounded borders, status pills, latency on a colour
+  scale, country flags next to the Geo column and bracketed key hints.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
@@ -38,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Table, JSON, JSONL and CSV reports with filters, sorting and statistics.
 - `Ctrl-C` handling that still reports partial results.
 
-[Unreleased]: https://github.com/Shidori5417/proxyforge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Shidori5417/proxyforge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Shidori5417/proxyforge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Shidori5417/proxyforge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Shidori5417/proxyforge/releases/tag/v0.1.0

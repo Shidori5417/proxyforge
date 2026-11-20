@@ -19,6 +19,8 @@ English documentation: [README.md](README.md)
 - Offline GeoIP zenginleştirme (`--geo-db`) ve ülke/ASN filtreleri.
 - Dönel çoklu judge ve yanıt doğrulaması (`--judge`, `--expect`).
 - Canlı havuzu döndüren yerel proxy sunucusu (`--serve`).
+- Sağ kalanları `--save` ile uç nokta, JSON veya CSV olarak kaydeder.
+- Panoda (`S`) canlı ayar düzenleme; Enter toplu işi yeni değerlerle baştan başlatır.
 - HTTP (`Proxy-Authorization`) ve SOCKS5 için kullanıcı adı/şifre doğrulaması.
 - İşçi havuzu sayesinde yüksek eşzamanlılık — yavaş bir proxy sırayı tıkamaz.
 - Proxy başına zaman aşımı, isteğe bağlı yeniden deneme ve doğru gecikme ölçümü.
@@ -78,9 +80,9 @@ proxyforge -i proxies.txt --alive-only --max-latency 800 \
 # Listeyi borudan al, stdout'a sadece uç noktaları yaz
 cat proxies.txt | proxyforge -i - --quiet > alive.txt
 
-# Listeleri doğrudan web'den çek, sadece Türkiye çıkışlarını tut
+# Listeleri doğrudan web'den çek, Türkiye çıkışlarını tut ve kaydet
 proxyforge -i https://example.com/proxies.txt --geo-db GeoLite2-Country.mmdb \
-  --geo-db GeoLite2-ASN.mmdb --country tr --alive-only
+  --geo-db GeoLite2-ASN.mmdb --country tr --save tr.txt
 
 # Şemasız bir listeyi kontrol et, sonra sağ kalanları yerel döndürücü olarak sun
 proxyforge -i plain.txt --detect --serve 127.0.0.1:8080 --rotate-on-error
@@ -128,6 +130,9 @@ proxyforge [SEÇENEKLER] [PROXY]...
 | `--detect` | Şemasız uç noktalar için HTTP/SOCKS5/SOCKS4dene |
 | `--protocols <LİSTE>` | Sadece bu protokolleri kontrol et (virgülle) |
 | `--sort <SIRA>` | `latency` (varsayılan), `proxy` veya `status` |
+| `--save <DOSYA>` | Çalıştıktan sonra sadece canlı proxy'leri dosyaya yaz |
+| `--save-append` | Kayıt dosyasının üzerine yazmak yerine sona ekle |
+| `--save-format <BÇM>` | `endpoints` (varsayılan), `json` veya `csv` |
 | `--geo-db <DOSYA>` | MaxMind mmdb biçiminde offline GeoIP veritabanı; tekrarlanabilir |
 | `--country <KODLAR>` | Sadece bu ülkelerden çıkan proxy'leri raporla |
 | `--exclude-country <KODLAR>` | Bu ülkelerden çıkan proxy'leri ele |
@@ -186,6 +191,19 @@ JSON çıktısı bir nesne dizisidir:
 CSV aynı alanları kullanır. Kimlik bilgilerini çıktıda tutmak için
 `--show-credentials` kullanın.
 
+## Sağ kalanları kaydetme
+
+`--save`, yalnızca yanıt veren proxy'leri — tespit edilen şemaları ve kimlik
+bilgileri dahil — yazar; dosya doğrudan geri beslenebilir:
+
+```bash
+proxyforge -i proxies.txt --detect --save alive.txt
+proxyforge -i alive.txt --alive-only --country tr --save-append tr.txt
+```
+
+`--save-format json` (veya `csv`) tüm alanları tutar. `Ctrl-C` ile kesmek de o
+ana kadar kontrol edilenleri kaydeder; panoda `e` tuşu aynı dosyaya yazar.
+
 ## Etkileşimli pano
 
 `--tui`, sayfanın başında görünen canlı panoyu açar:
@@ -198,9 +216,15 @@ CSV aynı alanları kullanır. Kimlik bilgilerini çıktıda tutmak için
 | `g` / `G` | İlk / son proxy'ye git |
 | `f` | Filtreyi değiştir: all → alive → dead |
 | `s` | Sıralamayı değiştir: latency → proxy → status |
-| `e` | Görünen canlı uç noktaları `proxyforge-export.txt`'e yaz |
+| `e` | Görünen canlı uç noktaları `--save` dosyasına yaz |
 | `r` | Seçili proxy'yi yeniden kontrol et |
+| `R` | Tüm ölü uç noktaları yeniden kontrol et |
+| `S` | Ayar panelini aç: judge, zaman aşımı, eşzamanlılık, deneme, tespit |
 | tekerlek / tıklama | Sonuçları kaydır / satır seç |
+
+Ayar panelinde `↑↓` alan seçer, `◀▶` veya rakamlar değeri değiştirir, `Enter`
+toplu işi yeni değerlerle baştan başlatır, `Esc` vazgeçer. Geçersiz giriş
+footer'da bildirilir ve hiçbir şeyi değiştirmez.
 | `?` | Yardım penceresini aç/kapat |
 
 Ayrıntı panosu imleci takip eder; tam hatayı, sızan yönlendirme başlıklarını ve
