@@ -4,7 +4,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use crate::anonymity::AnonymityLevel;
 use crate::report::CheckResult;
@@ -19,7 +21,15 @@ pub struct View<'a> {
     pub export_path: String,
 }
 
-const HINTS: &str = " q quit · ↑↓/jk move · f filter · s sort · e export · r recheck · ? help ";
+const KEYS: &[(&str, &str)] = &[
+    ("q", "quit"),
+    ("jk ↑↓", "move"),
+    ("f", "filter"),
+    ("s", "sort"),
+    ("e", "export"),
+    ("r", "recheck"),
+    ("?", "help"),
+];
 const HELP: &[(&str, &str)] = &[
     ("q / Esc", "quit the dashboard"),
     ("? ", "toggle this help"),
@@ -86,6 +96,7 @@ fn draw_header(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
     );
 
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .title(title)
         .title_top(Line::from(Span::styled(stats, Style::new().fg(Color::Gray))).right_aligned());
 
@@ -106,7 +117,9 @@ fn draw_results(frame: &mut Frame, app: &mut Dashboard, view: &View, area: Rect)
         app.sort().as_str(),
         rows.len()
     );
-    let block = Block::bordered().title(title);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title);
 
     if rows.is_empty() {
         let message = if app.checked() == 0 {
@@ -142,7 +155,7 @@ fn draw_results(frame: &mut Frame, app: &mut Dashboard, view: &View, area: Rect)
     let widths = [
         Constraint::Length(29),
         Constraint::Length(7),
-        Constraint::Length(7),
+        Constraint::Length(8),
         Constraint::Length(9),
         Constraint::Length(12),
         Constraint::Length(15),
@@ -184,9 +197,9 @@ fn row(result: &CheckResult, show_credentials: bool) -> Row<'static> {
     };
 
     let status = if result.alive {
-        Cell::from("alive").style(Style::new().fg(Color::Green))
+        Cell::from("● alive").style(Style::new().fg(Color::Green))
     } else {
-        Cell::from("dead").style(Style::new().fg(Color::Red))
+        Cell::from("○ dead").style(Style::new().fg(Color::Red))
     };
 
     let anonymity = match result.anonymity {
@@ -212,22 +225,18 @@ fn row(result: &CheckResult, show_credentials: bool) -> Row<'static> {
         Cell::from(endpoint),
         Cell::from(result.proxy.protocol.as_str()),
         status,
-        Cell::from(format!("{:>6} ms", result.latency_ms())),
+        latency_cell(result.latency_ms()),
         anonymity,
         Cell::from(result.exit_ip.clone().unwrap_or_else(|| "-".into())),
-        Cell::from(
-            result
-                .geo
-                .as_ref()
-                .map(|geo| geo.label())
-                .unwrap_or_else(|| "-".into()),
-        ),
+        geo_cell(result),
         Cell::from(detail),
     ])
 }
 
 fn draw_details(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
-    let block = Block::bordered().title(" details ");
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(" details ");
 
     let lines: Vec<Line> = match app.selected() {
         Some(result) => {
@@ -277,16 +286,29 @@ fn draw_details(frame: &mut Frame, app: &Dashboard, view: &View, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &Dashboard, area: Rect) {
-    match &app.notice {
-        Some(notice) => frame.render_widget(
-            Paragraph::new(format!(" {notice}")).style(Style::new().fg(Color::Yellow)),
+    if let Some(notice) = &app.notice {
+        frame.render_widget(
+            Paragraph::new(format!(" » {notice}")).style(Style::new().fg(Color::Yellow)),
             area,
-        ),
-        None => frame.render_widget(
-            Paragraph::new(HINTS).style(Style::new().fg(Color::DarkGray)),
-            area,
-        ),
+        );
+        return;
     }
+
+    let mut spans = Vec::new();
+    for (index, (key, description)) in KEYS.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("[{key}]"),
+            Style::new().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            format!(" {description}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -331,6 +353,55 @@ fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(vertical[1])[1]
+}
+
+/// Latency coloured by how slow the proxy answered.
+fn latency_cell(latency_ms: u128) -> Cell<'static> {
+    let color = if latency_ms < 300 {
+        Color::Green
+    } else if latency_ms < 1000 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    Cell::from(format!("{:>6} ms", latency_ms)).style(Style::new().fg(color))
+}
+
+/// Geo column: flag emoji plus ASN when the code is known.
+fn geo_cell(result: &CheckResult) -> Cell<'static> {
+    let Some(geo) = &result.geo else {
+        return Cell::from("-").style(Style::new().fg(Color::DarkGray));
+    };
+
+    let mut label = String::new();
+    if let Some(flag) = geo.code.as_deref().and_then(flag_of) {
+        label.push_str(&flag);
+        label.push(' ');
+    } else if let Some(code) = &geo.code {
+        label.push_str(code);
+        label.push(' ');
+    }
+    if let Some(asn) = geo.asn {
+        label.push_str(&format!("AS{asn}"));
+    }
+    if label.is_empty() {
+        label.push('-');
+    }
+    Cell::from(label)
+}
+
+/// Turns an ISO 3166-1 code into its regional indicator emoji.
+fn flag_of(code: &str) -> Option<String> {
+    let mut chars = code.chars();
+    let first = chars.next()?;
+    let second = chars.next()?;
+    let base = 'A' as u32;
+    if !(('A'..='Z').contains(&first) && ('A'..='Z').contains(&second)) {
+        return None;
+    }
+    let first = char::from_u32(0x1F1E6 + first as u32 - base)?;
+    let second = char::from_u32(0x1F1E6 + second as u32 - base)?;
+    Some(format!("{first}{second}"))
 }
 
 fn shorten(text: &str, max: usize) -> String {
@@ -413,7 +484,7 @@ mod tests {
         assert!(screen.contains("alive"));
         assert!(screen.contains("dead"));
         assert!(screen.contains("elite") || screen.contains("unknown"));
-        assert!(screen.contains("q quit"));
+        assert!(screen.contains("[q] quit"));
 
         // The details pane shows the selected row; move to the dead one.
         app.select_last();
