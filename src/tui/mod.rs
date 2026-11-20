@@ -33,8 +33,8 @@ use crate::report::CheckResult;
 pub use model::{Dashboard, Filter};
 pub use ui::View;
 
-/// File the `e` key writes the visible alive endpoints to.
-const EXPORT_PATH: &str = "proxyforge-export.txt";
+/// Default file the `e` key writes the visible alive endpoints to.
+const DEFAULT_EXPORT_PATH: &str = "proxyforge-export.txt";
 
 /// Settings the dashboard needs beyond the check options.
 #[derive(Debug, Clone)]
@@ -43,6 +43,8 @@ pub struct TuiConfig {
     pub workers: usize,
     pub show_credentials: bool,
     pub sort: Sort,
+    /// File the `e` key writes to; mirrors `--save` when given.
+    pub export_path: String,
 }
 
 /// What the event handler wants the run loop to do.
@@ -72,6 +74,7 @@ pub async fn run(
         judge: &config.judge,
         workers: config.workers,
         show_credentials: config.show_credentials,
+        export_path: config.export_path.clone(),
     };
     let mut app = Dashboard::new(total, config.sort);
     let mut session = TerminalSession::start()?;
@@ -114,7 +117,7 @@ pub async fn run(
                         let action = handle_event(event, &mut app);
                         match action {
                             Action::Quit => quit = true,
-                            Action::Export => export(&mut app, view.show_credentials),
+                            Action::Export => export(&mut app, &view),
                             Action::Recheck => recheck(&mut app, &settings, &recheck_sender),
                             Action::Browse => {}
                         }
@@ -130,18 +133,19 @@ pub async fn run(
     Ok(())
 }
 
-/// Writes the visible alive endpoints to [`EXPORT_PATH`].
-fn export(app: &mut Dashboard, show_credentials: bool) {
-    let text = app.export_endpoints(show_credentials);
+/// Writes the visible alive endpoints to the configured export file.
+fn export(app: &mut Dashboard, view: &View) {
+    let path = &view.export_path;
+    let text = app.export_endpoints(view.show_credentials);
     if text.is_empty() {
         app.notice("nothing to export: no alive endpoint is visible");
         return;
     }
 
     let count = text.lines().count();
-    match std::fs::write(EXPORT_PATH, text) {
-        Ok(()) => app.notice(format!("exported {count} endpoints to {EXPORT_PATH}")),
-        Err(error) => app.notice(format!("cannot write {EXPORT_PATH}: {error}")),
+    match std::fs::write(path, text) {
+        Ok(()) => app.notice(format!("exported {count} endpoints to {path}")),
+        Err(error) => app.notice(format!("cannot write {path}: {error}")),
     }
 }
 

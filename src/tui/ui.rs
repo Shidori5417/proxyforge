@@ -16,6 +16,7 @@ pub struct View<'a> {
     pub judge: &'a str,
     pub workers: usize,
     pub show_credentials: bool,
+    pub export_path: String,
 }
 
 const HINTS: &str = " q quit · ↑↓/jk move · f filter · s sort · e export · r recheck · ? help ";
@@ -380,6 +381,7 @@ mod tests {
             judge: "httpbin.org/get",
             workers: 100,
             show_credentials: false,
+            export_path: "proxyforge-export.txt".into(),
         };
         let borrowed = &mut *app;
         terminal.draw(|frame| draw(frame, borrowed, &view)).unwrap();

@@ -108,6 +108,10 @@ async fn run(cli: Cli) -> Result<()> {
                 workers: cli.concurrency as usize,
                 show_credentials: cli.show_credentials,
                 sort: cli.sort,
+                export_path: cli
+                    .save
+                    .clone()
+                    .unwrap_or_else(|| "proxyforge-export.txt".into()),
             },
         )
         .await?;
