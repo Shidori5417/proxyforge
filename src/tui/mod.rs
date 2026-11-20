@@ -33,9 +33,6 @@ use crate::report::CheckResult;
 pub use model::{Dashboard, Filter};
 pub use ui::View;
 
-/// Default file the `e` key writes the visible alive endpoints to.
-const DEFAULT_EXPORT_PATH: &str = "proxyforge-export.txt";
-
 /// Settings the dashboard needs beyond the check options.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
