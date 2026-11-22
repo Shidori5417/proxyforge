@@ -400,20 +400,27 @@ async fn read_chunked<S: AsyncRead + Unpin + ?Sized>(
             }
             return Ok(body);
         }
-        if body.len() + size > MAX_BODY_SIZE {
+        // The size comes from the peer: never let it overflow the arithmetic.
+        if body
+            .len()
+            .checked_add(size)
+            .is_none_or(|total| total > MAX_BODY_SIZE)
+        {
             return Err(TransportError::Protocol(
                 "response body exceeds the size limit".into(),
             ));
         }
 
-        fill(stream, buffer, size + 2).await?;
+        // `size <= MAX_BODY_SIZE` here, so this cannot overflow.
+        let framed = size + 2;
+        fill(stream, buffer, framed).await?;
         body.extend_from_slice(&buffer[..size]);
-        if &buffer[size..size + 2] != b"\r\n" {
+        if &buffer[size..framed] != b"\r\n" {
             return Err(TransportError::Protocol(
                 "missing CRLF after chunk data".into(),
             ));
         }
-        buffer.drain(..size + 2);
+        buffer.drain(..framed);
     }
 }
 
@@ -765,6 +772,24 @@ fn reply_message(code: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_overflowing_chunk_size() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        let mut stream = &raw[..];
+        assert!(read_response(&mut stream).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_chunk_just_over_the_limit() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_BODY_SIZE + 1
+        );
+        let mut stream = raw.as_bytes();
+        let error = read_response(&mut stream).await.unwrap_err();
+        assert!(error.to_string().contains("size limit"), "{error}");
+    }
 
     #[tokio::test]
     async fn parses_content_length_response() {

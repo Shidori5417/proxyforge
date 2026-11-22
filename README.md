@@ -117,7 +117,7 @@ proxyforge [OPTIONS] [PROXY]...
 
 | Option | Description |
 | --- | --- |
-| `-i, --input <FILE>` | Read endpoints from a file; `-` reads stdin |
+| `-i, --input <FILE_OR_URL>` | Read endpoints from a file, a URL or `-` (stdin); repeatable |
 | `-j, --judge <URL>` | Judge URL requested through every proxy, repeatable |
 | `-c, --concurrency <N>` | Proxies checked in parallel (default `100`) |
 | `-t, --timeout <SECS>` | Per-proxy timeout (default `8`) |
@@ -223,11 +223,11 @@ key writes to the same file.
 | `R` | Re-check every dead endpoint |
 | `S` | Open the settings panel: judge, timeout, concurrency, retries, detection |
 | wheel / click | Scroll the results / select a row |
+| `?` | Show or hide the help overlay |
 
 Inside the settings panel, `↑↓` pick a field, `◀▶` or digits edit it, `Enter`
 restarts the whole batch with the new values and `Esc` cancels. Invalid input
 is reported in the footer and changes nothing.
-| `?` | Show or hide the help overlay |
 
 The details pane follows the cursor and shows the full error, the leaked
 forwarding headers and the exit IP. Quitting cancels the remaining checks and

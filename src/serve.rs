@@ -10,12 +10,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine as _;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::proxy::Proxy;
 use crate::transport::{self, BoxStream, Target};
+
+/// How long a client may take to send its request head.
+const CLIENT_HEAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How the pool is served.
 #[derive(Debug, Clone)]
@@ -102,9 +106,14 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
     state.counter.fetch_add(1, Ordering::Relaxed);
 
     let mut leftover = Vec::with_capacity(4096);
-    let head = transport::read_head(&mut client, &mut leftover)
-        .await
-        .context("cannot read the client request")?;
+    // Bound the wait so a silent client cannot hold a task open forever.
+    let head = tokio::time::timeout(
+        CLIENT_HEAD_TIMEOUT,
+        transport::read_head(&mut client, &mut leftover),
+    )
+    .await
+    .context("timed out waiting for the client request")?
+    .context("cannot read the client request")?;
 
     let text = String::from_utf8_lossy(&head);
     let request_line = text.lines().next().unwrap_or_default();
@@ -238,26 +247,49 @@ async fn open_through(
     Ok(stream)
 }
 
-/// The bytes to write upstream before relaying: the original request, with the
-/// URI rewritten to origin form for SOCKS pool members.
+/// The bytes to write upstream before relaying: the original request with the
+/// client's own proxy headers removed, the URI rewritten to origin form for
+/// SOCKS pool members, and the pool member's credentials added for HTTP ones.
 fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Vec<u8> {
-    if !proxy.protocol.is_socks() {
-        return [head, leftover].concat();
-    }
-
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
     let request_line = lines.next().unwrap_or_default();
-    let mut tokens = request_line.splitn(3, ' ');
-    let method = tokens.next().unwrap_or("GET").to_string();
-    let version = request_line.split(' ').next_back().unwrap_or("HTTP/1.1");
 
-    let mut prefix = format!("{method} {path} {version}");
-    for line in lines {
-        prefix.push_str("\r\n");
-        prefix.push_str(line);
+    let mut out: Vec<String> = Vec::new();
+    if proxy.protocol.is_socks() {
+        let mut tokens = request_line.splitn(3, ' ');
+        let method = tokens.next().unwrap_or("GET");
+        let version = request_line.split(' ').next_back().unwrap_or("HTTP/1.1");
+        out.push(format!("{method} {path} {version}"));
+    } else {
+        out.push(request_line.to_string());
     }
-    let mut bytes = prefix.into_bytes();
+
+    let mut ended = false;
+    for line in lines {
+        if !ended && line.is_empty() {
+            // End of the header block: inject the pool member's credentials.
+            ended = true;
+            if !proxy.protocol.is_socks()
+                && let Some(user) = &proxy.username
+            {
+                let password = proxy.password.as_deref().unwrap_or("");
+                let token =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                out.push(format!("Proxy-Authorization: Basic {token}"));
+            }
+        } else if !ended {
+            let name = line.split(':').next().unwrap_or_default().trim();
+            if name.eq_ignore_ascii_case("proxy-authorization")
+                || name.eq_ignore_ascii_case("proxy-connection")
+            {
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    let mut bytes = out.join("\r\n").into_bytes();
     bytes.extend_from_slice(leftover);
     bytes
 }
@@ -333,6 +365,34 @@ mod tests {
             prefix,
             b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn forward_prefix_injects_pool_credentials_and_strips_client_proxy_headers() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128)
+            .with_credentials("user", Some("pass".to_string()));
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nproxy-authorization: Basic Y2xpZW50\r\nProxy-Connection: keep-alive\r\n\r\n",
+            b"body",
+            "/x",
+        );
+        assert_eq!(
+            prefix,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\nbody"
+        );
+    }
+
+    #[test]
+    fn forward_prefix_strips_client_proxy_headers_without_credentials() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Socks5, "10.0.0.1", 1080);
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: Basic Y2xpZW50\r\n\r\n",
+            b"",
+            "/x",
+        );
+        assert_eq!(prefix, b"GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n");
     }
 
     #[test]

@@ -221,11 +221,11 @@ ana kadar kontrol edilenleri kaydeder; panoda `e` tuşu aynı dosyaya yazar.
 | `R` | Tüm ölü uç noktaları yeniden kontrol et |
 | `S` | Ayar panelini aç: judge, zaman aşımı, eşzamanlılık, deneme, tespit |
 | tekerlek / tıklama | Sonuçları kaydır / satır seç |
+| `?` | Yardım penceresini aç/kapat |
 
 Ayar panelinde `↑↓` alan seçer, `◀▶` veya rakamlar değeri değiştirir, `Enter`
 toplu işi yeni değerlerle baştan başlatır, `Esc` vazgeçer. Geçersiz giriş
 footer'da bildirilir ve hiçbir şeyi değiştirmez.
-| `?` | Yardım penceresini aç/kapat |
 
 Ayrıntı panosu imleci takip eder; tam hatayı, sızan yönlendirme başlıklarını ve
 çıkış IP'sini gösterir. Çıkış kalan kontrolleri iptal eder ve terminali eski
