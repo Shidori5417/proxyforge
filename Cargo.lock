@@ -849,6 +849,7 @@ dependencies = [
  "comfy-table",
  "crossterm 0.29.0",
  "csv",
+ "fastrand",
  "indicatif",
  "maxminddb",
  "ratatui",

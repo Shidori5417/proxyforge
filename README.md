@@ -268,8 +268,21 @@ curl -x http://127.0.0.1:8080 https://httpbin.org/get
 ```
 
 Rotation walks the pool in order every `--rotate N` requests, or picks randomly
-with `--rotate-random`. With `--rotate-on-error` a failing pool member is
-skipped and the next one retries the request. `Ctrl-C` stops the server.
+(a fresh random member every N requests) with `--rotate-random`. With
+`--rotate-on-error` a failing pool member is skipped and the next one retries
+the request. `Ctrl-C` stops the server.
+
+What counts as one unit for `--rotate`:
+
+- **Plain HTTP requests** are counted per request. Each one is forwarded with
+  `Connection: close` (the client's `Connection`, `Keep-Alive` and
+  `Proxy-Connection` headers are dropped), the response is streamed back
+  respecting `Content-Length` / chunked framing, and the client connection is
+  then closed. Keep-alive clients just reconnect, so every request gets its own
+  pool pick.
+- **`CONNECT` tunnels** are opaque byte streams and are counted per tunnel: all
+  traffic inside one tunnel (for example every request of an HTTPS session)
+  uses the same pool member.
 
 ## Anonymity levels
 

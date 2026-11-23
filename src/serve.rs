@@ -3,6 +3,11 @@
 //! After a check run, the alive proxies form a pool and the tool listens as an
 //! ordinary HTTP proxy itself: every incoming request or `CONNECT` tunnel is
 //! forwarded through the next pool member, either in order or at random.
+//!
+//! Plain HTTP requests are forwarded with `Connection: close` and the client
+//! connection is closed once the response has been relayed, so every request
+//! gets its own pool pick (keep-alive clients simply reconnect). `CONNECT`
+//! tunnels are opaque byte streams: one tunnel is one pick.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
@@ -26,7 +31,8 @@ const CLIENT_HEAD_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ServeConfig {
     /// `host:port` to listen on.
     pub bind: SocketAddr,
-    /// Rotate to the next proxy after this many requests.
+    /// Rotate to the next proxy after this many requests (plain HTTP) or
+    /// `CONNECT` tunnels.
     pub rotate: usize,
     /// Pick a random pool member instead of going in order.
     pub random: bool,
@@ -36,24 +42,40 @@ pub struct ServeConfig {
 
 struct ServeState {
     pool: Vec<Proxy>,
-    /// Requests served so far; drives sequential rotation.
+    /// Requests and tunnels accepted so far; drives rotation.
     counter: AtomicUsize,
+    /// Pool index currently in use in random mode (re-drawn every `rotate`).
+    random_base: AtomicUsize,
     config: ServeConfig,
     timeout: Duration,
 }
 
 impl ServeState {
-    /// The pool member for `attempt` of the current request.
-    fn pick_at(&self, attempt: usize) -> &Proxy {
-        let served = self.counter.load(Ordering::Relaxed);
+    /// Registers a request or tunnel and returns the pool index it starts
+    /// from. Sequential mode moves one step every `rotate` requests; random
+    /// mode draws a fresh random member every `rotate` requests.
+    fn next_base(&self) -> usize {
+        let served = self.counter.fetch_add(1, Ordering::Relaxed);
+        self.base_for(served)
+    }
+
+    fn base_for(&self, served: usize) -> usize {
         let length = self.pool.len().max(1);
-        let index = if self.config.random {
-            // Cheap pseudo randomisation without a dependency.
-            served.wrapping_add(attempt).wrapping_mul(2654435761) % length
+        let rotate = self.config.rotate.max(1);
+        if self.config.random {
+            if served % rotate == 0 {
+                self.random_base
+                    .store(fastrand::usize(..length), Ordering::Relaxed);
+            }
+            self.random_base.load(Ordering::Relaxed) % length
         } else {
-            (served / self.config.rotate.max(1) + attempt) % length
-        };
-        &self.pool[index]
+            (served / rotate) % length
+        }
+    }
+
+    /// The pool member for retry `attempt` of a request starting at `base`.
+    fn pick_at(&self, base: usize, attempt: usize) -> &Proxy {
+        &self.pool[(base + attempt) % self.pool.len().max(1)]
     }
 }
 
@@ -76,6 +98,7 @@ pub async fn start(
     let state = Arc::new(ServeState {
         pool,
         counter: AtomicUsize::new(0),
+        random_base: AtomicUsize::new(0),
         config,
         timeout,
     });
@@ -103,8 +126,6 @@ fn writeln_to_stderr(message: &anyhow::Error) -> std::io::Result<()> {
 }
 
 async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> {
-    state.counter.fetch_add(1, Ordering::Relaxed);
-
     let mut leftover = Vec::with_capacity(4096);
     // Bound the wait so a silent client cannot hold a task open forever.
     let head = tokio::time::timeout(
@@ -123,7 +144,9 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_connect_target(&uri)?;
-        let mut upstream = connect_upstream(state, &host, port, Tunnel::Yes, "", &[], &[]).await?;
+        let base = state.next_base();
+        let mut upstream =
+            connect_upstream(state, base, &host, port, Tunnel::Yes, "", &[], &[]).await?;
         client
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
             .await?;
@@ -138,8 +161,10 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
     }
 
     let target = absolute_target(&uri)?;
+    let base = state.next_base();
     let upstream = connect_upstream(
         state,
+        base,
         &target.host,
         target.port,
         Tunnel::No,
@@ -148,8 +173,7 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
         &leftover,
     )
     .await?;
-    relay(client, upstream).await;
-    Ok(())
+    relay_http(client, upstream, method.eq_ignore_ascii_case("HEAD")).await
 }
 
 /// Whether the client asked for a raw tunnel (`CONNECT`).
@@ -161,8 +185,10 @@ enum Tunnel {
 
 /// Opens a connection to the target through a pool member, honouring the
 /// rotation and retry policy.
+#[allow(clippy::too_many_arguments)]
 async fn connect_upstream(
     state: &ServeState,
+    base: usize,
     host: &str,
     port: u16,
     tunnel: Tunnel,
@@ -173,7 +199,7 @@ async fn connect_upstream(
     let mut last_error = anyhow::anyhow!("no proxy in the pool");
 
     for attempt in 0..state.pool.len() {
-        let proxy = state.pick_at(attempt);
+        let proxy = state.pick_at(base, attempt);
         let future = open_through(proxy, host, port, tunnel);
         match tokio::time::timeout(state.timeout, future).await {
             Ok(Ok(mut stream)) => {
@@ -270,6 +296,8 @@ fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Ve
         if !ended && line.is_empty() {
             // End of the header block: inject the pool member's credentials.
             ended = true;
+            // One request per upstream connection; the client reconnects.
+            out.push("Connection: close".to_string());
             if !proxy.protocol.is_socks()
                 && let Some(user) = &proxy.username
             {
@@ -282,6 +310,8 @@ fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Ve
             let name = line.split(':').next().unwrap_or_default().trim();
             if name.eq_ignore_ascii_case("proxy-authorization")
                 || name.eq_ignore_ascii_case("proxy-connection")
+                || name.eq_ignore_ascii_case("connection")
+                || name.eq_ignore_ascii_case("keep-alive")
             {
                 continue;
             }
@@ -291,6 +321,76 @@ fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Ve
 
     let mut bytes = out.join("\r\n").into_bytes();
     bytes.extend_from_slice(leftover);
+    bytes
+}
+
+/// Relays one plain HTTP exchange and then closes the client connection.
+///
+/// The response is streamed back with its own framing respected and rewritten
+/// to `Connection: close`, so the client opens a new connection (and thus
+/// gets a fresh pool pick) for its next request. Request body bytes that
+/// follow the head keep flowing upstream while the response is relayed.
+async fn relay_http(client: TcpStream, upstream: BoxStream, request_was_head: bool) -> Result<()> {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+
+    let upload = async {
+        let _ = tokio::io::copy(&mut client_read, &mut upstream_write).await;
+        // The request is complete (or the client left); only the response
+        // decides when the exchange ends.
+        std::future::pending::<()>().await;
+    };
+
+    let mut started = false;
+    let response = transport::relay_response(
+        &mut upstream_read,
+        &mut client_write,
+        request_was_head,
+        close_response_head,
+        &mut started,
+    );
+
+    let result = tokio::select! {
+        result = response => result,
+        () = upload => unreachable!("the upload future never completes"),
+    };
+
+    if let Err(error) = &result
+        && !started
+    {
+        let _ = write_bad_gateway(&mut client_write).await;
+        return Err(anyhow::anyhow!("invalid upstream response: {error}"));
+    }
+    let _ = client_write.shutdown().await;
+    result.context("cannot relay the upstream response")
+}
+
+async fn write_bad_gateway<W: AsyncWrite + Unpin>(client: &mut W) -> std::io::Result<()> {
+    client
+        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        .await
+}
+
+/// Replaces the response's connection management headers with
+/// `Connection: close`.
+fn close_response_head(head: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(head);
+    let block = text.strip_suffix("\r\n\r\n").unwrap_or(&text);
+    let mut out: Vec<&str> = Vec::new();
+    for (index, line) in block.split("\r\n").enumerate() {
+        let name = line.split(':').next().unwrap_or_default().trim();
+        if index > 0
+            && (name.eq_ignore_ascii_case("connection")
+                || name.eq_ignore_ascii_case("keep-alive")
+                || name.eq_ignore_ascii_case("proxy-connection"))
+        {
+            continue;
+        }
+        out.push(line);
+    }
+    out.push("Connection: close");
+    let mut bytes = out.join("\r\n").into_bytes();
+    bytes.extend_from_slice(b"\r\n\r\n");
     bytes
 }
 
@@ -353,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_prefix_is_untouched_for_http_proxies() {
+    fn forward_prefix_only_adds_connection_close_for_http_proxies() {
         let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
         let prefix = forward_prefix(
             &proxy,
@@ -363,7 +463,7 @@ mod tests {
         );
         assert_eq!(
             prefix,
-            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
         );
     }
 
@@ -379,7 +479,7 @@ mod tests {
         );
         assert_eq!(
             prefix,
-            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\nbody"
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\nbody"
         );
     }
 
@@ -392,7 +492,10 @@ mod tests {
             b"",
             "/x",
         );
-        assert_eq!(prefix, b"GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assert_eq!(
+            prefix,
+            b"GET /x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
     }
 
     #[test]
@@ -404,53 +507,118 @@ mod tests {
             b"",
             "/x?q=1",
         );
-        assert_eq!(prefix, b"GET /x?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assert_eq!(
+            prefix,
+            b"GET /x?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
     }
 
-    #[test]
-    fn rotation_walks_the_pool() {
-        let state = ServeState {
-            pool: vec![
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 1),
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.2", 2),
-            ],
-            counter: AtomicUsize::new(1),
+    fn state(pool_size: u16, rotate: usize, random: bool) -> ServeState {
+        ServeState {
+            pool: (1..=pool_size)
+                .map(|port| Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", port))
+                .collect(),
+            counter: AtomicUsize::new(0),
+            random_base: AtomicUsize::new(0),
             config: ServeConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
-                rotate: 1,
-                random: false,
+                rotate,
+                random,
                 rotate_on_error: true,
             },
             timeout: Duration::from_secs(3),
-        };
+        }
+    }
 
-        // Request 1 with rotate=1 is the second one: pool index 1.
-        assert_eq!(state.pick_at(0).port, 2);
-        // The retry wraps back to the first pool member.
-        assert_eq!(state.pick_at(1).port, 1);
+    #[test]
+    fn rotation_walks_the_pool_from_the_first_member() {
+        let state = state(2, 1, false);
 
-        state.counter.store(2, Ordering::Relaxed);
-        assert_eq!(state.pick_at(0).port, 1);
+        // The very first request uses the first pool member.
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 1);
+        // The retry moves on, wrapping around.
+        assert_eq!(state.pick_at(base, 1).port, 2);
+        assert_eq!(state.pick_at(base, 2).port, 1);
+
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 2);
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 1);
     }
 
     #[test]
     fn rotation_respects_the_rotate_interval() {
-        let state = ServeState {
-            pool: vec![
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 1),
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.2", 2),
-            ],
-            counter: AtomicUsize::new(2),
-            config: ServeConfig {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                rotate: 3,
-                random: false,
-                rotate_on_error: false,
-            },
-            timeout: Duration::from_secs(3),
-        };
+        let state = state(2, 3, false);
 
-        // Requests 0..3 use the first proxy, 3..6 the second.
-        assert_eq!(state.pick_at(0).port, 1);
+        // Requests 0..3 use the first proxy, 3..6 the second, then it wraps.
+        let ports: Vec<u16> = (0..7)
+            .map(|_| {
+                let base = state.next_base();
+                state.pick_at(base, 0).port
+            })
+            .collect();
+        assert_eq!(ports, [1, 1, 1, 2, 2, 2, 1]);
+    }
+
+    #[test]
+    fn random_rotation_reaches_every_member_and_is_not_sequential() {
+        let state = state(5, 1, true);
+
+        let ports: Vec<u16> = (0..400)
+            .map(|_| {
+                let base = state.next_base();
+                state.pick_at(base, 0).port
+            })
+            .collect();
+
+        for port in 1..=5 {
+            assert!(ports.contains(&port), "member {port} was never picked");
+        }
+        // Not a plain 1,2,3,4,5 walk and not the old counter hash either.
+        let sequential: Vec<u16> = (0..400).map(|index| (index % 5 + 1) as u16).collect();
+        assert_ne!(ports, sequential);
+        assert!(ports.windows(2).any(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn random_rotation_holds_a_member_for_the_rotate_interval() {
+        let state = state(50, 4, true);
+
+        for _ in 0..25 {
+            let ports: Vec<u16> = (0..4)
+                .map(|_| {
+                    let base = state.next_base();
+                    state.pick_at(base, 0).port
+                })
+                .collect();
+            assert!(ports.iter().all(|port| *port == ports[0]), "{ports:?}");
+        }
+    }
+
+    #[test]
+    fn forward_prefix_forces_connection_close_and_strips_hop_by_hop_headers() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\nkeep-alive: timeout=5\r\nProxy-Connection: keep-alive\r\n\r\n",
+            b"",
+            "/x",
+        );
+        assert_eq!(
+            prefix,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn response_head_is_rewritten_to_connection_close() {
+        let head = close_response_head(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
+        );
+        assert_eq!(
+            head,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
+        );
     }
 }

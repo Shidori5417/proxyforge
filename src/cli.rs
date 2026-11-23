@@ -144,7 +144,7 @@ pub struct Cli {
     #[arg(long, value_name = "BIND")]
     pub serve: Option<String>,
 
-    /// Rotate to the next pool member every N requests (with --serve)
+    /// Rotate to the next pool member every N HTTP requests or CONNECT tunnels (with --serve)
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub rotate: usize,
 
