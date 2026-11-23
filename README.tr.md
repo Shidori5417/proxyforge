@@ -221,11 +221,11 @@ ana kadar kontrol edilenleri kaydeder; panoda `e` tuşu aynı dosyaya yazar.
 | `R` | Tüm ölü uç noktaları yeniden kontrol et |
 | `S` | Ayar panelini aç: judge, zaman aşımı, eşzamanlılık, deneme, tespit |
 | tekerlek / tıklama | Sonuçları kaydır / satır seç |
+| `?` | Yardım penceresini aç/kapat |
 
 Ayar panelinde `↑↓` alan seçer, `◀▶` veya rakamlar değeri değiştirir, `Enter`
 toplu işi yeni değerlerle baştan başlatır, `Esc` vazgeçer. Geçersiz giriş
 footer'da bildirilir ve hiçbir şeyi değiştirmez.
-| `?` | Yardım penceresini aç/kapat |
 
 Ayrıntı panosu imleci takip eder; tam hatayı, sızan yönlendirme başlıklarını ve
 çıkış IP'sini gösterir. Çıkış kalan kontrolleri iptal eder ve terminali eski
@@ -266,8 +266,19 @@ curl -x http://127.0.0.1:8080 https://httpbin.org/get
 ```
 
 Dönme, her `--rotate N` istekte sırayla ilerler; `--rotate-random` rastgele
-seçer. `--rotate-on-error` ile başarısız üye atlanır ve sıradaki isteği yeniden
-dener. `Ctrl-C` sunucuyu durdurur.
+seçer (her N istekte yeni bir rastgele üye). `--rotate-on-error` ile başarısız
+üye atlanır ve sıradaki isteği yeniden dener. `Ctrl-C` sunucuyu durdurur.
+
+`--rotate` için sayılan birim:
+
+- **Düz HTTP istekleri** istek başına sayılır. Her biri `Connection: close` ile
+  iletilir (istemcinin `Connection`, `Keep-Alive` ve `Proxy-Connection`
+  başlıkları atılır), yanıt `Content-Length` / chunked çerçevelemesine uyularak
+  geri akıtılır ve ardından istemci bağlantısı kapatılır. Keep-alive istemciler
+  yeniden bağlanır; böylece her istek kendi havuz seçimini alır.
+- **`CONNECT` tünelleri** opak bayt akışlarıdır ve tünel başına sayılır: bir
+  tünelin içindeki tüm trafik (örneğin bir HTTPS oturumunun bütün istekleri)
+  aynı havuz üyesini kullanır.
 
 ## Anonimlik seviyeleri
 

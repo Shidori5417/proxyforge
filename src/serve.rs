@@ -3,6 +3,11 @@
 //! After a check run, the alive proxies form a pool and the tool listens as an
 //! ordinary HTTP proxy itself: every incoming request or `CONNECT` tunnel is
 //! forwarded through the next pool member, either in order or at random.
+//!
+//! Plain HTTP requests are forwarded with `Connection: close` and the client
+//! connection is closed once the response has been relayed, so every request
+//! gets its own pool pick (keep-alive clients simply reconnect). `CONNECT`
+//! tunnels are opaque byte streams: one tunnel is one pick.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,19 +15,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::AsyncWriteExt;
+use base64::Engine as _;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::proxy::Proxy;
 use crate::transport::{self, BoxStream, Target};
 
+/// How long a client may take to send its request head.
+const CLIENT_HEAD_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How the pool is served.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     /// `host:port` to listen on.
     pub bind: SocketAddr,
-    /// Rotate to the next proxy after this many requests.
+    /// Rotate to the next proxy after this many requests (plain HTTP) or
+    /// `CONNECT` tunnels.
     pub rotate: usize,
     /// Pick a random pool member instead of going in order.
     pub random: bool,
@@ -32,24 +42,40 @@ pub struct ServeConfig {
 
 struct ServeState {
     pool: Vec<Proxy>,
-    /// Requests served so far; drives sequential rotation.
+    /// Requests and tunnels accepted so far; drives rotation.
     counter: AtomicUsize,
+    /// Pool index currently in use in random mode (re-drawn every `rotate`).
+    random_base: AtomicUsize,
     config: ServeConfig,
     timeout: Duration,
 }
 
 impl ServeState {
-    /// The pool member for `attempt` of the current request.
-    fn pick_at(&self, attempt: usize) -> &Proxy {
-        let served = self.counter.load(Ordering::Relaxed);
+    /// Registers a request or tunnel and returns the pool index it starts
+    /// from. Sequential mode moves one step every `rotate` requests; random
+    /// mode draws a fresh random member every `rotate` requests.
+    fn next_base(&self) -> usize {
+        let served = self.counter.fetch_add(1, Ordering::Relaxed);
+        self.base_for(served)
+    }
+
+    fn base_for(&self, served: usize) -> usize {
         let length = self.pool.len().max(1);
-        let index = if self.config.random {
-            // Cheap pseudo randomisation without a dependency.
-            served.wrapping_add(attempt).wrapping_mul(2654435761) % length
+        let rotate = self.config.rotate.max(1);
+        if self.config.random {
+            if served % rotate == 0 {
+                self.random_base
+                    .store(fastrand::usize(..length), Ordering::Relaxed);
+            }
+            self.random_base.load(Ordering::Relaxed) % length
         } else {
-            (served / self.config.rotate.max(1) + attempt) % length
-        };
-        &self.pool[index]
+            (served / rotate) % length
+        }
+    }
+
+    /// The pool member for retry `attempt` of a request starting at `base`.
+    fn pick_at(&self, base: usize, attempt: usize) -> &Proxy {
+        &self.pool[(base + attempt) % self.pool.len().max(1)]
     }
 }
 
@@ -72,6 +98,7 @@ pub async fn start(
     let state = Arc::new(ServeState {
         pool,
         counter: AtomicUsize::new(0),
+        random_base: AtomicUsize::new(0),
         config,
         timeout,
     });
@@ -99,12 +126,15 @@ fn writeln_to_stderr(message: &anyhow::Error) -> std::io::Result<()> {
 }
 
 async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> {
-    state.counter.fetch_add(1, Ordering::Relaxed);
-
     let mut leftover = Vec::with_capacity(4096);
-    let head = transport::read_head(&mut client, &mut leftover)
-        .await
-        .context("cannot read the client request")?;
+    // Bound the wait so a silent client cannot hold a task open forever.
+    let head = tokio::time::timeout(
+        CLIENT_HEAD_TIMEOUT,
+        transport::read_head(&mut client, &mut leftover),
+    )
+    .await
+    .context("timed out waiting for the client request")?
+    .context("cannot read the client request")?;
 
     let text = String::from_utf8_lossy(&head);
     let request_line = text.lines().next().unwrap_or_default();
@@ -114,7 +144,9 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_connect_target(&uri)?;
-        let mut upstream = connect_upstream(state, &host, port, Tunnel::Yes, "", &[], &[]).await?;
+        let base = state.next_base();
+        let mut upstream =
+            connect_upstream(state, base, &host, port, Tunnel::Yes, "", &[], &[]).await?;
         client
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
             .await?;
@@ -129,8 +161,10 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
     }
 
     let target = absolute_target(&uri)?;
+    let base = state.next_base();
     let upstream = connect_upstream(
         state,
+        base,
         &target.host,
         target.port,
         Tunnel::No,
@@ -139,8 +173,7 @@ async fn handle_client(mut client: TcpStream, state: &ServeState) -> Result<()> 
         &leftover,
     )
     .await?;
-    relay(client, upstream).await;
-    Ok(())
+    relay_http(client, upstream, method.eq_ignore_ascii_case("HEAD")).await
 }
 
 /// Whether the client asked for a raw tunnel (`CONNECT`).
@@ -152,8 +185,10 @@ enum Tunnel {
 
 /// Opens a connection to the target through a pool member, honouring the
 /// rotation and retry policy.
+#[allow(clippy::too_many_arguments)]
 async fn connect_upstream(
     state: &ServeState,
+    base: usize,
     host: &str,
     port: u16,
     tunnel: Tunnel,
@@ -164,7 +199,7 @@ async fn connect_upstream(
     let mut last_error = anyhow::anyhow!("no proxy in the pool");
 
     for attempt in 0..state.pool.len() {
-        let proxy = state.pick_at(attempt);
+        let proxy = state.pick_at(base, attempt);
         let future = open_through(proxy, host, port, tunnel);
         match tokio::time::timeout(state.timeout, future).await {
             Ok(Ok(mut stream)) => {
@@ -238,27 +273,194 @@ async fn open_through(
     Ok(stream)
 }
 
-/// The bytes to write upstream before relaying: the original request, with the
-/// URI rewritten to origin form for SOCKS pool members.
-fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Vec<u8> {
-    if !proxy.protocol.is_socks() {
-        return [head, leftover].concat();
-    }
+/// Header name of a raw header line (bytes before the first `:`), trimmed.
+fn header_name(line: &[u8]) -> &[u8] {
+    let end = line.iter().position(|b| *b == b':').unwrap_or(line.len());
+    line[..end].trim_ascii()
+}
 
-    let text = String::from_utf8_lossy(head);
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
-    let mut tokens = request_line.splitn(3, ' ');
-    let method = tokens.next().unwrap_or("GET").to_string();
-    let version = request_line.split(' ').next_back().unwrap_or("HTTP/1.1");
+/// Header value of a raw header line (bytes after the first `:`), trimmed.
+fn header_value(line: &[u8]) -> &[u8] {
+    line.iter()
+        .position(|b| *b == b':')
+        .map_or(&[][..], |at| line[at + 1..].trim_ascii())
+}
 
-    let mut prefix = format!("{method} {path} {version}");
+/// Whether a header block asks for a protocol upgrade (`Connection: Upgrade`
+/// together with an `Upgrade` header).
+fn is_upgrade<'a>(lines: impl Iterator<Item = &'a [u8]>) -> bool {
+    let mut connection_upgrade = false;
+    let mut upgrade_header = false;
     for line in lines {
-        prefix.push_str("\r\n");
-        prefix.push_str(line);
+        let name = header_name(line);
+        if name.eq_ignore_ascii_case(b"connection") {
+            connection_upgrade |= header_value(line)
+                .split(|b| *b == b',')
+                .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"upgrade"));
+        } else if name.eq_ignore_ascii_case(b"upgrade") {
+            upgrade_header = true;
+        }
     }
-    let mut bytes = prefix.into_bytes();
+    connection_upgrade && upgrade_header
+}
+
+/// Splits a raw head on CRLF without touching the bytes of any line, so
+/// opaque (obs-text) header bytes survive untouched.
+fn split_crlf(head: &[u8]) -> Vec<&[u8]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i + 1 < head.len() {
+        if head[i] == b'\r' && head[i + 1] == b'\n' {
+            lines.push(&head[start..i]);
+            start = i + 2;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    lines.push(&head[start..]);
+    lines
+}
+
+/// The bytes to write upstream before relaying: the original request with the
+/// client's own proxy headers removed, the URI rewritten to origin form for
+/// SOCKS pool members, and the pool member's credentials added for HTTP ones.
+/// Works on bytes, so header values that are not UTF-8 are forwarded verbatim.
+/// An upgrade request (e.g. WebSocket) keeps `Connection: Upgrade`.
+fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Vec<u8> {
+    let lines = split_crlf(head);
+    let request_line = lines.first().copied().unwrap_or_default();
+    let upgrade = is_upgrade(lines.iter().skip(1).copied());
+
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    if proxy.protocol.is_socks() {
+        let method = request_line.split(|b| *b == b' ').next().unwrap_or(b"GET");
+        let version = request_line
+            .rsplit(|b| *b == b' ')
+            .next()
+            .unwrap_or(b"HTTP/1.1");
+        let mut line = method.to_vec();
+        line.push(b' ');
+        line.extend_from_slice(path.as_bytes());
+        line.push(b' ');
+        line.extend_from_slice(version);
+        out.push(line);
+    } else {
+        out.push(request_line.to_vec());
+    }
+
+    let mut ended = false;
+    for line in lines.iter().skip(1) {
+        if !ended && line.is_empty() {
+            // End of the header block: inject the pool member's credentials.
+            ended = true;
+            if upgrade {
+                // The upgraded connection is relayed as a raw tunnel.
+                out.push(b"Connection: Upgrade".to_vec());
+            } else {
+                // One request per upstream connection; the client reconnects.
+                out.push(b"Connection: close".to_vec());
+            }
+            if !proxy.protocol.is_socks()
+                && let Some(user) = &proxy.username
+            {
+                let password = proxy.password.as_deref().unwrap_or("");
+                let token =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                out.push(format!("Proxy-Authorization: Basic {token}").into_bytes());
+            }
+        } else if !ended {
+            let name = header_name(line);
+            if name.eq_ignore_ascii_case(b"proxy-authorization")
+                || name.eq_ignore_ascii_case(b"proxy-connection")
+                || name.eq_ignore_ascii_case(b"connection")
+                || name.eq_ignore_ascii_case(b"keep-alive")
+            {
+                continue;
+            }
+        }
+        out.push(line.to_vec());
+    }
+
+    let mut bytes = out.join(&b"\r\n"[..]);
     bytes.extend_from_slice(leftover);
+    bytes
+}
+
+/// Relays one plain HTTP exchange and then closes the client connection.
+///
+/// The response is streamed back with its own framing respected and rewritten
+/// to `Connection: close`, so the client opens a new connection (and thus
+/// gets a fresh pool pick) for its next request. Request body bytes that
+/// follow the head keep flowing upstream while the response is relayed.
+async fn relay_http(client: TcpStream, upstream: BoxStream, request_was_head: bool) -> Result<()> {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+
+    let upload = async {
+        let _ = tokio::io::copy(&mut client_read, &mut upstream_write).await;
+        // The request is complete (or the client left); only the response
+        // decides when the exchange ends.
+        std::future::pending::<()>().await;
+    };
+
+    let mut started = false;
+    let response = transport::relay_response(
+        &mut upstream_read,
+        &mut client_write,
+        request_was_head,
+        close_response_head,
+        &mut started,
+    );
+
+    let result = tokio::select! {
+        result = response => result,
+        () = upload => unreachable!("the upload future never completes"),
+    };
+
+    if let Err(error) = &result
+        && !started
+    {
+        let _ = write_bad_gateway(&mut client_write).await;
+        return Err(anyhow::anyhow!("invalid upstream response: {error}"));
+    }
+    let _ = client_write.shutdown().await;
+    result.context("cannot relay the upstream response")
+}
+
+async fn write_bad_gateway<W: AsyncWrite + Unpin>(client: &mut W) -> std::io::Result<()> {
+    client
+        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        .await
+}
+
+/// Replaces the response's connection management headers with
+/// `Connection: close`. A `101 Switching Protocols` head is passed through
+/// untouched (its `Connection: Upgrade` must reach the client). Operates on
+/// bytes so opaque header values are preserved.
+fn close_response_head(head: &[u8]) -> Vec<u8> {
+    let block = head.strip_suffix(b"\r\n\r\n").unwrap_or(head);
+    let lines = split_crlf(block);
+    let status_line = lines.first().copied().unwrap_or_default();
+    if status_line.split(|b| *b == b' ').nth(1) == Some(b"101") {
+        return head.to_vec();
+    }
+    let mut out: Vec<&[u8]> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let name = header_name(line);
+        if index > 0
+            && (name.eq_ignore_ascii_case(b"connection")
+                || name.eq_ignore_ascii_case(b"keep-alive")
+                || name.eq_ignore_ascii_case(b"proxy-connection"))
+        {
+            continue;
+        }
+        out.push(line);
+    }
+    out.push(b"Connection: close");
+    let mut bytes = out.join(&b"\r\n"[..]);
+    bytes.extend_from_slice(b"\r\n\r\n");
     bytes
 }
 
@@ -321,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_prefix_is_untouched_for_http_proxies() {
+    fn forward_prefix_only_adds_connection_close_for_http_proxies() {
         let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
         let prefix = forward_prefix(
             &proxy,
@@ -331,7 +533,38 @@ mod tests {
         );
         assert_eq!(
             prefix,
-            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn forward_prefix_injects_pool_credentials_and_strips_client_proxy_headers() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128)
+            .with_credentials("user", Some("pass".to_string()));
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nproxy-authorization: Basic Y2xpZW50\r\nProxy-Connection: keep-alive\r\n\r\n",
+            b"body",
+            "/x",
+        );
+        assert_eq!(
+            prefix,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\nbody"
+        );
+    }
+
+    #[test]
+    fn forward_prefix_strips_client_proxy_headers_without_credentials() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Socks5, "10.0.0.1", 1080);
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: Basic Y2xpZW50\r\n\r\n",
+            b"",
+            "/x",
+        );
+        assert_eq!(
+            prefix,
+            b"GET /x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
         );
     }
 
@@ -344,53 +577,154 @@ mod tests {
             b"",
             "/x?q=1",
         );
-        assert_eq!(prefix, b"GET /x?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assert_eq!(
+            prefix,
+            b"GET /x?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
     }
 
-    #[test]
-    fn rotation_walks_the_pool() {
-        let state = ServeState {
-            pool: vec![
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 1),
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.2", 2),
-            ],
-            counter: AtomicUsize::new(1),
+    fn state(pool_size: u16, rotate: usize, random: bool) -> ServeState {
+        ServeState {
+            pool: (1..=pool_size)
+                .map(|port| Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", port))
+                .collect(),
+            counter: AtomicUsize::new(0),
+            random_base: AtomicUsize::new(0),
             config: ServeConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
-                rotate: 1,
-                random: false,
+                rotate,
+                random,
                 rotate_on_error: true,
             },
             timeout: Duration::from_secs(3),
-        };
+        }
+    }
 
-        // Request 1 with rotate=1 is the second one: pool index 1.
-        assert_eq!(state.pick_at(0).port, 2);
-        // The retry wraps back to the first pool member.
-        assert_eq!(state.pick_at(1).port, 1);
+    #[test]
+    fn rotation_walks_the_pool_from_the_first_member() {
+        let state = state(2, 1, false);
 
-        state.counter.store(2, Ordering::Relaxed);
-        assert_eq!(state.pick_at(0).port, 1);
+        // The very first request uses the first pool member.
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 1);
+        // The retry moves on, wrapping around.
+        assert_eq!(state.pick_at(base, 1).port, 2);
+        assert_eq!(state.pick_at(base, 2).port, 1);
+
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 2);
+        let base = state.next_base();
+        assert_eq!(state.pick_at(base, 0).port, 1);
     }
 
     #[test]
     fn rotation_respects_the_rotate_interval() {
-        let state = ServeState {
-            pool: vec![
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 1),
-                Proxy::new(crate::proxy::Protocol::Http, "10.0.0.2", 2),
-            ],
-            counter: AtomicUsize::new(2),
-            config: ServeConfig {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                rotate: 3,
-                random: false,
-                rotate_on_error: false,
-            },
-            timeout: Duration::from_secs(3),
-        };
+        let state = state(2, 3, false);
 
-        // Requests 0..3 use the first proxy, 3..6 the second.
-        assert_eq!(state.pick_at(0).port, 1);
+        // Requests 0..3 use the first proxy, 3..6 the second, then it wraps.
+        let ports: Vec<u16> = (0..7)
+            .map(|_| {
+                let base = state.next_base();
+                state.pick_at(base, 0).port
+            })
+            .collect();
+        assert_eq!(ports, [1, 1, 1, 2, 2, 2, 1]);
+    }
+
+    #[test]
+    fn random_rotation_reaches_every_member_and_is_not_sequential() {
+        let state = state(5, 1, true);
+
+        let ports: Vec<u16> = (0..400)
+            .map(|_| {
+                let base = state.next_base();
+                state.pick_at(base, 0).port
+            })
+            .collect();
+
+        for port in 1..=5 {
+            assert!(ports.contains(&port), "member {port} was never picked");
+        }
+        // Not a plain 1,2,3,4,5 walk and not the old counter hash either.
+        let sequential: Vec<u16> = (0..400).map(|index| (index % 5 + 1) as u16).collect();
+        assert_ne!(ports, sequential);
+        assert!(ports.windows(2).any(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn random_rotation_holds_a_member_for_the_rotate_interval() {
+        let state = state(50, 4, true);
+
+        for _ in 0..25 {
+            let ports: Vec<u16> = (0..4)
+                .map(|_| {
+                    let base = state.next_base();
+                    state.pick_at(base, 0).port
+                })
+                .collect();
+            assert!(ports.iter().all(|port| *port == ports[0]), "{ports:?}");
+        }
+    }
+
+    #[test]
+    fn forward_prefix_forces_connection_close_and_strips_hop_by_hop_headers() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let prefix = forward_prefix(
+            &proxy,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\nkeep-alive: timeout=5\r\nProxy-Connection: keep-alive\r\n\r\n",
+            b"",
+            "/x",
+        );
+        assert_eq!(
+            prefix,
+            b"GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn response_head_is_rewritten_to_connection_close() {
+        let head = close_response_head(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
+        );
+        assert_eq!(
+            head,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn forward_prefix_preserves_opaque_header_bytes() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let head = b"GET http://example.com/x HTTP/1.1\r\nX-Sig: a\xff\xfeb\r\nConnection: keep-alive\r\n\r\n";
+        let prefix = forward_prefix(&proxy, head, b"", "/x");
+        assert_eq!(
+            prefix,
+            &b"GET http://example.com/x HTTP/1.1\r\nX-Sig: a\xff\xfeb\r\nConnection: close\r\n\r\n"
+                [..]
+        );
+    }
+
+    #[test]
+    fn forward_prefix_keeps_connection_upgrade_for_upgrade_requests() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let head = b"GET http://example.com/ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n";
+        let prefix = forward_prefix(&proxy, head, b"", "/ws");
+        assert_eq!(
+            prefix,
+            &b"GET http://example.com/ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"[..]
+        );
+    }
+
+    #[test]
+    fn response_head_preserves_opaque_bytes_and_upgrade_responses() {
+        let head = close_response_head(
+            b"HTTP/1.1 200 OK\r\nX-Meta: \x80\xff\r\nConnection: keep-alive\r\n\r\n",
+        );
+        assert_eq!(
+            head,
+            &b"HTTP/1.1 200 OK\r\nX-Meta: \x80\xff\r\nConnection: close\r\n\r\n"[..]
+        );
+        let upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+        assert_eq!(close_response_head(upgrade), &upgrade[..]);
     }
 }

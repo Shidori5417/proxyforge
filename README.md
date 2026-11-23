@@ -117,7 +117,7 @@ proxyforge [OPTIONS] [PROXY]...
 
 | Option | Description |
 | --- | --- |
-| `-i, --input <FILE>` | Read endpoints from a file; `-` reads stdin |
+| `-i, --input <FILE_OR_URL>` | Read endpoints from a file, a URL or `-` (stdin); repeatable |
 | `-j, --judge <URL>` | Judge URL requested through every proxy, repeatable |
 | `-c, --concurrency <N>` | Proxies checked in parallel (default `100`) |
 | `-t, --timeout <SECS>` | Per-proxy timeout (default `8`) |
@@ -223,11 +223,11 @@ key writes to the same file.
 | `R` | Re-check every dead endpoint |
 | `S` | Open the settings panel: judge, timeout, concurrency, retries, detection |
 | wheel / click | Scroll the results / select a row |
+| `?` | Show or hide the help overlay |
 
 Inside the settings panel, `↑↓` pick a field, `◀▶` or digits edit it, `Enter`
 restarts the whole batch with the new values and `Esc` cancels. Invalid input
 is reported in the footer and changes nothing.
-| `?` | Show or hide the help overlay |
 
 The details pane follows the cursor and shows the full error, the leaked
 forwarding headers and the exit IP. Quitting cancels the remaining checks and
@@ -268,8 +268,21 @@ curl -x http://127.0.0.1:8080 https://httpbin.org/get
 ```
 
 Rotation walks the pool in order every `--rotate N` requests, or picks randomly
-with `--rotate-random`. With `--rotate-on-error` a failing pool member is
-skipped and the next one retries the request. `Ctrl-C` stops the server.
+(a fresh random member every N requests) with `--rotate-random`. With
+`--rotate-on-error` a failing pool member is skipped and the next one retries
+the request. `Ctrl-C` stops the server.
+
+What counts as one unit for `--rotate`:
+
+- **Plain HTTP requests** are counted per request. Each one is forwarded with
+  `Connection: close` (the client's `Connection`, `Keep-Alive` and
+  `Proxy-Connection` headers are dropped), the response is streamed back
+  respecting `Content-Length` / chunked framing, and the client connection is
+  then closed. Keep-alive clients just reconnect, so every request gets its own
+  pool pick.
+- **`CONNECT` tunnels** are opaque byte streams and are counted per tunnel: all
+  traffic inside one tunnel (for example every request of an HTTPS session)
+  uses the same pool member.
 
 ## Anonymity levels
 

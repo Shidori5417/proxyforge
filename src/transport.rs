@@ -314,7 +314,7 @@ pub(crate) async fn read_head<S: AsyncRead + Unpin + ?Sized>(
     }
 }
 
-fn parse_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), TransportError> {
+pub(crate) fn parse_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), TransportError> {
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
@@ -400,20 +400,184 @@ async fn read_chunked<S: AsyncRead + Unpin + ?Sized>(
             }
             return Ok(body);
         }
-        if body.len() + size > MAX_BODY_SIZE {
+        // The size comes from the peer: never let it overflow the arithmetic.
+        if body
+            .len()
+            .checked_add(size)
+            .is_none_or(|total| total > MAX_BODY_SIZE)
+        {
             return Err(TransportError::Protocol(
                 "response body exceeds the size limit".into(),
             ));
         }
 
-        fill(stream, buffer, size + 2).await?;
+        // `size <= MAX_BODY_SIZE` here, so this cannot overflow.
+        let framed = size + 2;
+        fill(stream, buffer, framed).await?;
         body.extend_from_slice(&buffer[..size]);
-        if &buffer[size..size + 2] != b"\r\n" {
+        if &buffer[size..framed] != b"\r\n" {
             return Err(TransportError::Protocol(
                 "missing CRLF after chunk data".into(),
             ));
         }
-        buffer.drain(..size + 2);
+        buffer.drain(..framed);
+    }
+}
+
+/// Reads one response from `upstream` and streams it to `client` as it
+/// arrives, honouring the framing (`Content-Length`, chunked, none, or until
+/// EOF) so the relay stops exactly at the end of the message.
+///
+/// `head_rewrite` may adjust the header block before it is forwarded.
+/// Interim `1xx` responses are forwarded and followed by the real one.
+/// `started` is set once the first byte went to the client, so callers know
+/// whether an error response can still be sent.
+pub(crate) async fn relay_response<R, W>(
+    upstream: &mut R,
+    client: &mut W,
+    request_was_head: bool,
+    head_rewrite: impl Fn(&[u8]) -> Vec<u8>,
+    started: &mut bool,
+) -> Result<(), TransportError>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    let mut buffer = Vec::with_capacity(4096);
+    loop {
+        let head = read_head(upstream, &mut buffer).await?;
+        let (status, headers) = parse_head(&head)?;
+        client.write_all(&head_rewrite(&head)).await?;
+        *started = true;
+
+        let interim = (100..200).contains(&status) && status != 101;
+        if interim {
+            continue;
+        }
+
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        let chunked = header("transfer-encoding").is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        });
+
+        if status == 101 {
+            // Switching protocols: whatever follows is the upgraded stream
+            // (e.g. WebSocket frames), relayed until the upstream closes.
+            client.write_all(&buffer).await?;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let read = upstream.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                client.write_all(&chunk[..read]).await?;
+                client.flush().await?;
+            }
+        } else if request_was_head || status == 204 || status == 304 {
+            // No body follows, whatever the headers claim.
+        } else if chunked {
+            forward_chunked(upstream, &mut buffer, client).await?;
+        } else if let Some(length) =
+            header("content-length").and_then(|value| value.trim().parse::<u64>().ok())
+        {
+            forward_exact(upstream, &mut buffer, client, length).await?;
+        } else {
+            client.write_all(&buffer).await?;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let read = upstream.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                client.write_all(&chunk[..read]).await?;
+            }
+        }
+        client.flush().await?;
+        return Ok(());
+    }
+}
+
+/// Forwards exactly `remaining` bytes, taking buffered bytes first.
+async fn forward_exact<R, W>(
+    upstream: &mut R,
+    buffer: &mut Vec<u8>,
+    client: &mut W,
+    mut remaining: u64,
+) -> Result<(), TransportError>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    while remaining > 0 {
+        if buffer.is_empty() {
+            read_more(upstream, buffer).await?;
+        }
+        let take =
+            usize::try_from(remaining).map_or(buffer.len(), |wanted| wanted.min(buffer.len()));
+        client.write_all(&buffer[..take]).await?;
+        buffer.drain(..take);
+        remaining -= take as u64;
+    }
+    Ok(())
+}
+
+/// Takes one CRLF-terminated line (terminator included) out of `buffer`.
+async fn take_raw_line<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    buffer: &mut Vec<u8>,
+) -> Result<Vec<u8>, TransportError> {
+    loop {
+        if let Some(position) = find(buffer, b"\r\n") {
+            return Ok(buffer.drain(..position + 2).collect());
+        }
+        if buffer.len() > MAX_LINE_SIZE {
+            return Err(TransportError::Protocol("response line too long".into()));
+        }
+        read_more(stream, buffer).await?;
+    }
+}
+
+/// Forwards a chunked body verbatim, including the terminating chunk and any
+/// trailers, without buffering it.
+async fn forward_chunked<R, W>(
+    upstream: &mut R,
+    buffer: &mut Vec<u8>,
+    client: &mut W,
+) -> Result<(), TransportError>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    loop {
+        let line = take_raw_line(upstream, buffer).await?;
+        client.write_all(&line).await?;
+        let text = String::from_utf8_lossy(&line[..line.len() - 2]);
+        let size_text = text.split(';').next().unwrap_or_default().trim();
+        let size = u64::from_str_radix(size_text, 16)
+            .map_err(|_| TransportError::Protocol(format!("invalid chunk size `{size_text}`")))?;
+
+        if size == 0 {
+            loop {
+                let trailer = take_raw_line(upstream, buffer).await?;
+                client.write_all(&trailer).await?;
+                if trailer.len() == 2 {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Chunk data plus its trailing CRLF; the size comes from the peer.
+        let framed = size.checked_add(2).ok_or_else(|| {
+            TransportError::Protocol(format!("chunk size `{size_text}` is too large"))
+        })?;
+        forward_exact(upstream, buffer, client, framed).await?;
     }
 }
 
@@ -767,6 +931,24 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn rejects_overflowing_chunk_size() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        let mut stream = &raw[..];
+        assert!(read_response(&mut stream).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_chunk_just_over_the_limit() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_BODY_SIZE + 1
+        );
+        let mut stream = raw.as_bytes();
+        let error = read_response(&mut stream).await.unwrap_err();
+        assert!(error.to_string().contains("size limit"), "{error}");
+    }
+
+    #[tokio::test]
     async fn parses_content_length_response() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: yes\r\n\r\nhello";
         let mut stream = &raw[..];
@@ -775,6 +957,76 @@ mod tests {
         assert_eq!(response.text(), "hello");
         assert_eq!(response.header("x-test"), Some("yes"));
         assert!(response.is_success());
+    }
+
+    async fn relayed(raw: &[u8], head_request: bool) -> Result<Vec<u8>, TransportError> {
+        let mut upstream = raw;
+        let mut out = Vec::new();
+        let mut started = false;
+        relay_response(
+            &mut upstream,
+            &mut out,
+            head_request,
+            <[u8]>::to_vec,
+            &mut started,
+        )
+        .await?;
+        Ok(out)
+    }
+
+    #[tokio::test]
+    async fn relay_stops_at_content_length() {
+        // Bytes after the message (a pipelined reply) must not leak through.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloEXTRA";
+        let out = relayed(raw, false).await.unwrap();
+        assert_eq!(out, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+    }
+
+    #[tokio::test]
+    async fn relay_forwards_chunked_bodies_verbatim_and_stops_after_the_trailer() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    4;ext=1\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: 1\r\n\r\nEXTRA";
+        let out = relayed(raw, false).await.unwrap();
+        assert!(out.ends_with(b"0\r\nX-Trailer: 1\r\n\r\n"));
+        assert!(!out.ends_with(b"EXTRA"));
+        assert_eq!(out.len(), raw.len() - 5);
+    }
+
+    #[tokio::test]
+    async fn relay_reads_to_eof_without_framing() {
+        let raw = b"HTTP/1.1 200 OK\r\n\r\nuntil the end";
+        assert_eq!(relayed(raw, false).await.unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn relay_skips_bodies_for_head_and_204() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n";
+        assert_eq!(relayed(raw, true).await.unwrap(), raw);
+        let raw = b"HTTP/1.1 204 No Content\r\n\r\nEXTRA";
+        assert_eq!(
+            relayed(raw, false).await.unwrap(),
+            b"HTTP/1.1 204 No Content\r\n\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_streams_upgraded_connections_after_101() {
+        let raw = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nContent-Length: 2\r\n\r\nframe-data-longer-than-two";
+        assert_eq!(relayed(raw, false).await.unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn relay_forwards_interim_responses_first() {
+        let raw = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        assert_eq!(relayed(raw, false).await.unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_overflowing_chunk_sizes_and_truncation() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        assert!(relayed(raw, false).await.is_err());
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
+        assert!(relayed(raw, false).await.is_err());
     }
 
     #[tokio::test]

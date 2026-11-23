@@ -5,7 +5,8 @@
 
 use std::future::Future;
 use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -720,6 +721,266 @@ async fn serve_rewrites_requests_for_socks_pools() {
         .unwrap();
     assert_eq!(response.status, 200);
     assert!(response.text().contains("203.0.113.7"));
+
+    task.abort();
+}
+
+// ---- --serve: per-request rotation -----------------------------------------
+
+#[derive(Clone, Copy)]
+enum Reply {
+    /// `Content-Length` body holding the tag, advertised as keep-alive.
+    Length,
+    /// The tag as two chunks plus a trailer.
+    Chunked,
+    /// Echoes the request body back (`Content-Length` framed).
+    EchoBody,
+}
+
+/// A pool member that identifies itself in every response and records what it
+/// received. It never closes the connection by itself, like a keep-alive peer.
+struct Tagged {
+    address: SocketAddr,
+    /// Plain requests and CONNECT tunnels seen.
+    hits: Arc<AtomicUsize>,
+    /// Request heads (request line and headers) of the plain requests.
+    heads: Arc<Mutex<Vec<String>>>,
+}
+
+async fn spawn_tagged_proxy(tag: &'static str, reply: Reply) -> Tagged {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let (seen_hits, seen_heads) = (Arc::clone(&hits), Arc::clone(&heads));
+
+    let address = spawn(move |stream| {
+        let (hits, heads) = (Arc::clone(&seen_hits), Arc::clone(&seen_heads));
+        async move {
+            let mut reader = BufReader::new(stream);
+            let (request_line, headers) = read_head(&mut reader).await;
+            hits.fetch_add(1, Ordering::SeqCst);
+
+            if request_line.starts_with("CONNECT") {
+                let _ = reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                return;
+            }
+
+            let mut head = request_line;
+            for (name, value) in &headers {
+                head.push_str(&format!("\n{name}: {value}"));
+            }
+            heads.lock().unwrap().push(head);
+
+            let response = match reply {
+                Reply::Length => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n{tag}",
+                    tag.len()
+                ),
+                Reply::Chunked => {
+                    let (left, right) = tag.split_at(tag.len() / 2);
+                    format!(
+                        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{left}\r\n{:x}\r\n{right}\r\n0\r\nX-Trailer: 1\r\n\r\n",
+                        left.len(),
+                        right.len()
+                    )
+                }
+                Reply::EchoBody => {
+                    let length: usize = headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.parse().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).await.unwrap();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{}",
+                        String::from_utf8_lossy(&body)
+                    )
+                }
+            };
+            let _ = reader.get_mut().write_all(response.as_bytes()).await;
+            // Keep-alive peer: hold the socket open long after the response.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    })
+    .await;
+
+    Tagged {
+        address,
+        hits,
+        heads,
+    }
+}
+
+async fn serve_pool(
+    members: &[&Tagged],
+    rotate: usize,
+    random: bool,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let config = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        rotate,
+        random,
+        rotate_on_error: false,
+    };
+    let pool = members
+        .iter()
+        .map(|member| Proxy::new(Protocol::Http, "127.0.0.1", member.address.port()))
+        .collect();
+    serve::start(pool, config, Duration::from_secs(3))
+        .await
+        .unwrap()
+}
+
+/// Sends `request` over a fresh connection and reads until the server closes
+/// it. Fails the test if the close does not come promptly.
+async fn exchange(serve: SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(serve).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+        .await
+        .expect("serve must close the client connection after the response")
+        .unwrap();
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn keep_alive_get(path: &str) -> String {
+    format!(
+        "GET http://example.invalid{path} HTTP/1.1\r\nHost: example.invalid\r\nConnection: keep-alive\r\nKeep-Alive: 300\r\nProxy-Connection: keep-alive\r\n\r\n"
+    )
+}
+
+#[tokio::test]
+async fn serve_picks_a_pool_member_per_request_and_closes_the_connection() {
+    let first = spawn_tagged_proxy("first-member", Reply::Length).await;
+    let second = spawn_tagged_proxy("second-member", Reply::Length).await;
+    let (address, task) = serve_pool(&[&first, &second], 1, false).await;
+
+    let one = exchange(address, &keep_alive_get("/a")).await;
+    let two = exchange(address, &keep_alive_get("/b")).await;
+    let three = exchange(address, &keep_alive_get("/c")).await;
+
+    assert!(one.ends_with("first-member"), "{one}");
+    assert!(two.ends_with("second-member"), "{two}");
+    assert!(three.ends_with("first-member"), "{three}");
+    // The client is told the connection ends, whatever the upstream said.
+    assert!(one.contains("Connection: close"));
+    assert!(!one.contains("keep-alive"));
+    assert!(!one.contains("Keep-Alive"));
+
+    // The forwarded request carries Connection: close and no hop-by-hop leftovers.
+    let heads = first.heads.lock().unwrap();
+    assert_eq!(heads.len(), 2);
+    let head = &heads[0];
+    assert!(head.contains("Connection: close"), "{head}");
+    assert!(!head.to_ascii_lowercase().contains("keep-alive"), "{head}");
+    assert!(
+        !head.to_ascii_lowercase().contains("proxy-connection"),
+        "{head}"
+    );
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_rotate_counts_requests_for_http() {
+    let first = spawn_tagged_proxy("member-a", Reply::Length).await;
+    let second = spawn_tagged_proxy("member-b", Reply::Length).await;
+    let (address, task) = serve_pool(&[&first, &second], 2, false).await;
+
+    let mut tags = Vec::new();
+    for index in 0..4 {
+        let response = exchange(address, &keep_alive_get(&format!("/{index}"))).await;
+        tags.push(if response.ends_with("member-a") {
+            'a'
+        } else {
+            'b'
+        });
+    }
+    assert_eq!(tags, ['a', 'a', 'b', 'b']);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_rotate_counts_tunnels_for_connect() {
+    let first = spawn_tagged_proxy("member-a", Reply::Length).await;
+    let second = spawn_tagged_proxy("member-b", Reply::Length).await;
+    let (address, task) = serve_pool(&[&first, &second], 2, false).await;
+
+    for _ in 0..4 {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status = String::new();
+        reader.read_line(&mut status).await.unwrap();
+        assert!(status.contains("200"), "{status}");
+    }
+
+    assert_eq!(first.hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second.hits.load(Ordering::SeqCst), 2);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_relays_chunked_responses() {
+    let member = spawn_tagged_proxy("chunked-body", Reply::Chunked).await;
+    let (address, task) = serve_pool(&[&member], 1, false).await;
+
+    let response = exchange(address, &keep_alive_get("/")).await;
+    assert!(
+        response.contains("Transfer-Encoding: chunked"),
+        "{response}"
+    );
+    assert!(response.contains("Connection: close"));
+    assert!(
+        response.ends_with("0\r\nX-Trailer: 1\r\n\r\n"),
+        "{response}"
+    );
+    assert!(response.contains("chunke\r\n"));
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_forwards_request_bodies() {
+    let member = spawn_tagged_proxy("unused", Reply::EchoBody).await;
+    let (address, task) = serve_pool(&[&member], 1, false).await;
+
+    let request = "POST http://example.invalid/post HTTP/1.1\r\nHost: example.invalid\r\nContent-Length: 11\r\n\r\nhello world";
+    let response = exchange(address, request).await;
+    assert!(response.ends_with("hello world"), "{response}");
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn serve_random_rotation_uses_the_whole_pool() {
+    let members = [
+        spawn_tagged_proxy("m0", Reply::Length).await,
+        spawn_tagged_proxy("m1", Reply::Length).await,
+        spawn_tagged_proxy("m2", Reply::Length).await,
+    ];
+    let refs: Vec<&Tagged> = members.iter().collect();
+    let (address, task) = serve_pool(&refs, 1, true).await;
+
+    for index in 0..60 {
+        exchange(address, &keep_alive_get(&format!("/{index}"))).await;
+    }
+    let counts: Vec<usize> = members
+        .iter()
+        .map(|member| member.hits.load(Ordering::SeqCst))
+        .collect();
+    assert_eq!(counts.iter().sum::<usize>(), 60);
+    assert!(counts.iter().all(|count| *count > 0), "{counts:?}");
 
     task.abort();
 }

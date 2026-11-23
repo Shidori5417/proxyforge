@@ -181,10 +181,18 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     if let Some(bind) = &cli.serve {
+        let bind_address: std::net::SocketAddr = bind
+            .parse()
+            .with_context(|| format!("invalid --serve address `{bind}`"))?;
+        if !bind_address.ip().is_loopback() {
+            eprintln!(
+                "warning: --serve is listening on {bind_address}, which is not a loopback address. \
+                 The proxy has no authentication: anyone who can reach this address can use it \
+                 (and your pool) as an open proxy."
+            );
+        }
         let config = ServeConfig {
-            bind: bind
-                .parse()
-                .with_context(|| format!("invalid --serve address `{bind}`"))?,
+            bind: bind_address,
             rotate: cli.rotate.max(1),
             random: cli.rotate_random,
             rotate_on_error: cli.rotate_on_error,
