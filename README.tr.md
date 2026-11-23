@@ -4,6 +4,7 @@
 proxy checker. Rust ile yazıldı.
 
 [![CI](https://github.com/Shidori5417/proxyforge/actions/workflows/ci.yml/badge.svg)](https://github.com/Shidori5417/proxyforge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Shidori5417/proxyforge)](https://github.com/Shidori5417/proxyforge/releases/latest)
 [![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-blue.svg)](LICENSE)
 
 English documentation: [README.md](README.md)
@@ -37,6 +38,12 @@ Her [sürümden](https://github.com/Shidori5417/proxyforge/releases) Linux, macO
 ve Windows için derlenmiş binary'ler indirilebilir.
 
 Güncel bir kararlı Rust sürümü gerekir (1.85+).
+
+```bash
+cargo install --git https://github.com/Shidori5417/proxyforge
+```
+
+Veya yerel depodan kurun:
 
 ```bash
 git clone https://github.com/Shidori5417/proxyforge.git
