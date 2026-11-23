@@ -467,7 +467,20 @@ where
                 .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
         });
 
-        if request_was_head || status == 204 || status == 304 {
+        if status == 101 {
+            // Switching protocols: whatever follows is the upgraded stream
+            // (e.g. WebSocket frames), relayed until the upstream closes.
+            client.write_all(&buffer).await?;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let read = upstream.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                client.write_all(&chunk[..read]).await?;
+                client.flush().await?;
+            }
+        } else if request_was_head || status == 204 || status == 304 {
             // No body follows, whatever the headers claim.
         } else if chunked {
             forward_chunked(upstream, &mut buffer, client).await?;
@@ -994,6 +1007,12 @@ mod tests {
             relayed(raw, false).await.unwrap(),
             b"HTTP/1.1 204 No Content\r\n\r\n"
         );
+    }
+
+    #[tokio::test]
+    async fn relay_streams_upgraded_connections_after_101() {
+        let raw = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nContent-Length: 2\r\n\r\nframe-data-longer-than-two";
+        assert_eq!(relayed(raw, false).await.unwrap(), raw);
     }
 
     #[tokio::test]

@@ -273,53 +273,117 @@ async fn open_through(
     Ok(stream)
 }
 
+/// Header name of a raw header line (bytes before the first `:`), trimmed.
+fn header_name(line: &[u8]) -> &[u8] {
+    let end = line.iter().position(|b| *b == b':').unwrap_or(line.len());
+    line[..end].trim_ascii()
+}
+
+/// Header value of a raw header line (bytes after the first `:`), trimmed.
+fn header_value(line: &[u8]) -> &[u8] {
+    line.iter()
+        .position(|b| *b == b':')
+        .map_or(&[][..], |at| line[at + 1..].trim_ascii())
+}
+
+/// Whether a header block asks for a protocol upgrade (`Connection: Upgrade`
+/// together with an `Upgrade` header).
+fn is_upgrade<'a>(lines: impl Iterator<Item = &'a [u8]>) -> bool {
+    let mut connection_upgrade = false;
+    let mut upgrade_header = false;
+    for line in lines {
+        let name = header_name(line);
+        if name.eq_ignore_ascii_case(b"connection") {
+            connection_upgrade |= header_value(line)
+                .split(|b| *b == b',')
+                .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"upgrade"));
+        } else if name.eq_ignore_ascii_case(b"upgrade") {
+            upgrade_header = true;
+        }
+    }
+    connection_upgrade && upgrade_header
+}
+
+/// Splits a raw head on CRLF without touching the bytes of any line, so
+/// opaque (obs-text) header bytes survive untouched.
+fn split_crlf(head: &[u8]) -> Vec<&[u8]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i + 1 < head.len() {
+        if head[i] == b'\r' && head[i + 1] == b'\n' {
+            lines.push(&head[start..i]);
+            start = i + 2;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    lines.push(&head[start..]);
+    lines
+}
+
 /// The bytes to write upstream before relaying: the original request with the
 /// client's own proxy headers removed, the URI rewritten to origin form for
 /// SOCKS pool members, and the pool member's credentials added for HTTP ones.
+/// Works on bytes, so header values that are not UTF-8 are forwarded verbatim.
+/// An upgrade request (e.g. WebSocket) keeps `Connection: Upgrade`.
 fn forward_prefix(proxy: &Proxy, head: &[u8], leftover: &[u8], path: &str) -> Vec<u8> {
-    let text = String::from_utf8_lossy(head);
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
+    let lines = split_crlf(head);
+    let request_line = lines.first().copied().unwrap_or_default();
+    let upgrade = is_upgrade(lines.iter().skip(1).copied());
 
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<u8>> = Vec::new();
     if proxy.protocol.is_socks() {
-        let mut tokens = request_line.splitn(3, ' ');
-        let method = tokens.next().unwrap_or("GET");
-        let version = request_line.split(' ').next_back().unwrap_or("HTTP/1.1");
-        out.push(format!("{method} {path} {version}"));
+        let method = request_line.split(|b| *b == b' ').next().unwrap_or(b"GET");
+        let version = request_line
+            .rsplit(|b| *b == b' ')
+            .next()
+            .unwrap_or(b"HTTP/1.1");
+        let mut line = method.to_vec();
+        line.push(b' ');
+        line.extend_from_slice(path.as_bytes());
+        line.push(b' ');
+        line.extend_from_slice(version);
+        out.push(line);
     } else {
-        out.push(request_line.to_string());
+        out.push(request_line.to_vec());
     }
 
     let mut ended = false;
-    for line in lines {
+    for line in lines.iter().skip(1) {
         if !ended && line.is_empty() {
             // End of the header block: inject the pool member's credentials.
             ended = true;
-            // One request per upstream connection; the client reconnects.
-            out.push("Connection: close".to_string());
+            if upgrade {
+                // The upgraded connection is relayed as a raw tunnel.
+                out.push(b"Connection: Upgrade".to_vec());
+            } else {
+                // One request per upstream connection; the client reconnects.
+                out.push(b"Connection: close".to_vec());
+            }
             if !proxy.protocol.is_socks()
                 && let Some(user) = &proxy.username
             {
                 let password = proxy.password.as_deref().unwrap_or("");
                 let token =
                     base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-                out.push(format!("Proxy-Authorization: Basic {token}"));
+                out.push(format!("Proxy-Authorization: Basic {token}").into_bytes());
             }
         } else if !ended {
-            let name = line.split(':').next().unwrap_or_default().trim();
-            if name.eq_ignore_ascii_case("proxy-authorization")
-                || name.eq_ignore_ascii_case("proxy-connection")
-                || name.eq_ignore_ascii_case("connection")
-                || name.eq_ignore_ascii_case("keep-alive")
+            let name = header_name(line);
+            if name.eq_ignore_ascii_case(b"proxy-authorization")
+                || name.eq_ignore_ascii_case(b"proxy-connection")
+                || name.eq_ignore_ascii_case(b"connection")
+                || name.eq_ignore_ascii_case(b"keep-alive")
             {
                 continue;
             }
         }
-        out.push(line.to_string());
+        out.push(line.to_vec());
     }
 
-    let mut bytes = out.join("\r\n").into_bytes();
+    let mut bytes = out.join(&b"\r\n"[..]);
     bytes.extend_from_slice(leftover);
     bytes
 }
@@ -372,24 +436,30 @@ async fn write_bad_gateway<W: AsyncWrite + Unpin>(client: &mut W) -> std::io::Re
 }
 
 /// Replaces the response's connection management headers with
-/// `Connection: close`.
+/// `Connection: close`. A `101 Switching Protocols` head is passed through
+/// untouched (its `Connection: Upgrade` must reach the client). Operates on
+/// bytes so opaque header values are preserved.
 fn close_response_head(head: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(head);
-    let block = text.strip_suffix("\r\n\r\n").unwrap_or(&text);
-    let mut out: Vec<&str> = Vec::new();
-    for (index, line) in block.split("\r\n").enumerate() {
-        let name = line.split(':').next().unwrap_or_default().trim();
+    let block = head.strip_suffix(b"\r\n\r\n").unwrap_or(head);
+    let lines = split_crlf(block);
+    let status_line = lines.first().copied().unwrap_or_default();
+    if status_line.split(|b| *b == b' ').nth(1) == Some(b"101") {
+        return head.to_vec();
+    }
+    let mut out: Vec<&[u8]> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let name = header_name(line);
         if index > 0
-            && (name.eq_ignore_ascii_case("connection")
-                || name.eq_ignore_ascii_case("keep-alive")
-                || name.eq_ignore_ascii_case("proxy-connection"))
+            && (name.eq_ignore_ascii_case(b"connection")
+                || name.eq_ignore_ascii_case(b"keep-alive")
+                || name.eq_ignore_ascii_case(b"proxy-connection"))
         {
             continue;
         }
         out.push(line);
     }
-    out.push("Connection: close");
-    let mut bytes = out.join("\r\n").into_bytes();
+    out.push(b"Connection: close");
+    let mut bytes = out.join(&b"\r\n"[..]);
     bytes.extend_from_slice(b"\r\n\r\n");
     bytes
 }
@@ -620,5 +690,41 @@ mod tests {
             head,
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn forward_prefix_preserves_opaque_header_bytes() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let head = b"GET http://example.com/x HTTP/1.1\r\nX-Sig: a\xff\xfeb\r\nConnection: keep-alive\r\n\r\n";
+        let prefix = forward_prefix(&proxy, head, b"", "/x");
+        assert_eq!(
+            prefix,
+            &b"GET http://example.com/x HTTP/1.1\r\nX-Sig: a\xff\xfeb\r\nConnection: close\r\n\r\n"
+                [..]
+        );
+    }
+
+    #[test]
+    fn forward_prefix_keeps_connection_upgrade_for_upgrade_requests() {
+        let proxy = Proxy::new(crate::proxy::Protocol::Http, "10.0.0.1", 3128);
+        let head = b"GET http://example.com/ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n";
+        let prefix = forward_prefix(&proxy, head, b"", "/ws");
+        assert_eq!(
+            prefix,
+            &b"GET http://example.com/ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"[..]
+        );
+    }
+
+    #[test]
+    fn response_head_preserves_opaque_bytes_and_upgrade_responses() {
+        let head = close_response_head(
+            b"HTTP/1.1 200 OK\r\nX-Meta: \x80\xff\r\nConnection: keep-alive\r\n\r\n",
+        );
+        assert_eq!(
+            head,
+            &b"HTTP/1.1 200 OK\r\nX-Meta: \x80\xff\r\nConnection: close\r\n\r\n"[..]
+        );
+        let upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+        assert_eq!(close_response_head(upgrade), &upgrade[..]);
     }
 }
