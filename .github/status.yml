@@ -1,0 +1,7 @@
+# Read by github.com/Shidori5417 (profile README) and the portfolio site.
+# Edit when the project's state changes; no need to touch it otherwise.
+# status: active | prototype | released | maintenance | paused | archived
+status: active
+focus:
+  en: "v0.3.0 is out: live settings panel, GeoIP filters and a rotating local proxy server."
+  tr: "v0.3.0 yayında: canlı ayar paneli, GeoIP filtreleri ve dönen proxy sunucusu."
