@@ -32,7 +32,7 @@ pub enum Protocol {
     Https,
     Socks4,
     Socks5,
-    /// SOCKS5 with local DNS resolution.
+    /// SOCKS5 with remote DNS resolution.
     Socks5h,
 }
 

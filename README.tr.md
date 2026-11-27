@@ -134,7 +134,7 @@ proxyforge [SEÇENEKLER] [PROXY]...
 | `--max-latency <MS>` | Bundan yavaş proxy'leri ele |
 | `--min-anonymity <SEVİYE>` | `transparent`, `anonymous` veya `elite` |
 | `--expect <METİN>` | Judge yanıtı bu metni içermiyorsa proxy'yi ölü say |
-| `--detect` | Şemasız uç noktalar için HTTP/SOCKS5/SOCKS4dene |
+| `--detect` | Şemasız uç noktalar için HTTP/SOCKS5/SOCKS4 dene |
 | `--protocols <LİSTE>` | Sadece bu protokolleri kontrol et (virgülle) |
 | `--sort <SIRA>` | `latency` (varsayılan), `proxy` veya `status` |
 | `--save <DOSYA>` | Çalıştıktan sonra sadece canlı proxy'leri dosyaya yaz |
@@ -162,11 +162,11 @@ Tablo stdout'a, özet stderr'e gider; böylece makine tarafından okunan çıkt�
 kalır:
 
 ```text
-╭────────────────────────┬───────┬────────┬─────────┬─────────────┬────────────────┬──────────╮
-│ Proxy                  ┆ Proto ┆ Status ┆ Latency ┆ Anonymity   ┆ Exit IP        ┆ Detail   │
-╞════════════════════════╪═══════╪════════╪═════════╪═════════════╪════════════════╪══════════╡
-│ socks5://1.2.3.4:1080  ┆ socks5┆ alive  ┆  142 ms ┆ elite       ┆ 203.0.113.9    ┆ HTTP 200 │
-╰────────────────────────┴───────┴────────┴─────────┴─────────────┴────────────────┴──────────╯
+╭────────────────────────┬───────┬────────┬─────────┬─────────────┬────────────────┬─────┬──────────╮
+│ Proxy                  ┆ Proto ┆ Status ┆ Latency ┆ Anonymity   ┆ Exit IP        ┆ Geo ┆ Detail   │
+╞════════════════════════╪═══════╪════════╪═════════╪═════════════╪════════════════╪═════╪══════════╡
+│ socks5://1.2.3.4:1080  ┆ socks5┆ alive  ┆  142 ms ┆ elite       ┆ 203.0.113.9    ┆ -   ┆ HTTP 200 │
+╰────────────────────────┴───────┴────────┴─────────┴─────────────┴────────────────┴─────┴──────────╯
 
 checked 1 proxies in 142 ms
 alive 1 (100.0%) · dead 0 (0.0%)
@@ -190,6 +190,10 @@ JSON çıktısı bir nesne dizisidir:
     "status_code": 200,
     "anonymity": "elite",
     "exit_ip": "203.0.113.9",
+    "country": null,
+    "country_code": null,
+    "asn": null,
+    "as_org": null,
     "error": null
   }
 ]
@@ -311,8 +315,11 @@ Tespit için istek başlıklarını yansıtan bir judge gerekir; varsayılan
 
 ```
 src/
+├── lib.rs        # çekirdek modülleri dışa aktaran kütüphane kökü
+├── cli.rs        # clap CLI tanımları, bayraklar ve alt komutlar
 ├── proxy.rs      # uç nokta ayrıştırma ve maskeleme
 ├── transport.rs  # HTTP/1.1 istemcisi: CONNECT, SOCKS4a, SOCKS5, TLS
+├── report.rs     # proxy başına CheckResult türleri
 ├── checker.rs    # işçi havuzu, yeniden deneme, gecikme, protokol tespiti
 ├── anonymity.rs  # judge yanıtı analizi
 ├── geo.rs        # offline GeoIP sorguları
