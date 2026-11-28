@@ -44,7 +44,7 @@ pub struct Cli {
     #[arg(long, value_name = "TEXT")]
     pub expect: Option<String>,
 
-    /// Probe schemesless endpoints for HTTP, SOCKS5 and SOCKS4 support
+    /// Probe schemeless endpoints for HTTP, SOCKS5 and SOCKS4 support
     #[arg(long)]
     pub detect: bool,
 

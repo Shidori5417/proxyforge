@@ -39,7 +39,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     if cli.tui && cli.serve.is_some() {
-        bail!("--tui and --serve cannot be combined");
+        bail!("--tui and --serve cannot be combined: the dashboard cannot host the rotator");
     }
 
     let mut proxies = loaded.proxies;
@@ -56,10 +56,6 @@ async fn run(cli: Cli) -> Result<()> {
     let mut judges = Vec::with_capacity(cli.judge.len());
     for url in &cli.judge {
         judges.push(Target::parse(url).with_context(|| format!("invalid judge URL `{url}`"))?);
-    }
-
-    if cli.tui && cli.serve.is_some() {
-        bail!("--tui and --serve cannot be combined: the dashboard cannot host the rotator");
     }
 
     let local_ip = if cli.no_anonymity {

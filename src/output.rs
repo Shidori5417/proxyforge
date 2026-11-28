@@ -117,6 +117,7 @@ impl Report {
             "Latency",
             "Anonymity",
             "Exit IP",
+            "Geo",
             "Detail",
         ]);
 
@@ -581,7 +582,49 @@ mod tests {
         });
         let report = Report::build(vec![result], &cli(&[]), Duration::from_secs(1));
         let text = report.render(&cli(&[])).unwrap();
-        assert!(text.contains("DE · AS3320"));
+        let lines: Vec<&str> = text.lines().collect();
+        let split_cells = |line: &str| -> Vec<String> {
+            line.trim_matches(|c| c == '│' || c == '┆')
+                .split(['│', '┆'])
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        };
+        let header_line = lines
+            .iter()
+            .find(|line| line.contains("Proxy"))
+            .expect("header row present");
+        let header_cells = split_cells(header_line);
+        assert_eq!(header_cells.len(), 8);
+        assert_eq!(header_cells[5], "Exit IP");
+        assert_eq!(header_cells[6], "Geo");
+        assert_eq!(header_cells[7], "Detail");
+
+        let sep_idx = lines
+            .iter()
+            .position(|line| line.starts_with('╞'))
+            .expect("header separator present");
+        let end_idx = lines
+            .iter()
+            .position(|line| line.starts_with('╰'))
+            .expect("table bottom border present");
+        let data_lines: Vec<Vec<String>> = lines[sep_idx + 1..end_idx]
+            .iter()
+            .map(|line| split_cells(line))
+            .collect();
+        assert!(!data_lines.is_empty());
+        for row in &data_lines {
+            assert_eq!(row.len(), 8);
+        }
+        let col = |idx: usize| -> String {
+            data_lines
+                .iter()
+                .map(|row| row[idx].as_str())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(col(6), "DE · AS3320");
+        assert_eq!(col(7), "HTTP 200");
     }
 
     #[test]

@@ -135,7 +135,7 @@ proxyforge [OPTIONS] [PROXY]...
 | `--max-latency <MS>` | Drop proxies slower than this |
 | `--min-anonymity <LEVEL>` | `transparent`, `anonymous` or `elite` |
 | `--expect <TEXT>` | Mark a proxy dead unless the judge response contains this text |
-| `--detect` | Probe schemesless endpoints for HTTP, SOCKS5 and SOCKS4 |
+| `--detect` | Probe schemeless endpoints for HTTP, SOCKS5 and SOCKS4 |
 | `--protocols <LIST>` | Only check these protocols, comma separated |
 | `--sort <ORDER>` | `latency` (default), `proxy` or `status` |
 | `--save <FILE>` | Write only the alive proxies to a file after the run |
@@ -163,11 +163,11 @@ The table goes to stdout and the summary to stderr, so machine-readable output
 stays clean:
 
 ```text
-╭────────────────────────┬───────┬────────┬─────────┬─────────────┬────────────────┬──────────╮
-│ Proxy                  ┆ Proto ┆ Status ┆ Latency ┆ Anonymity   ┆ Exit IP        ┆ Detail   │
-╞════════════════════════╪═══════╪════════╪═════════╪═════════════╪════════════════╪══════════╡
-│ socks5://1.2.3.4:1080  ┆ socks5┆ alive  ┆  142 ms ┆ elite       ┆ 203.0.113.9    ┆ HTTP 200 │
-╰────────────────────────┴───────┴────────┴─────────┴─────────────┴────────────────┴──────────╯
+╭────────────────────────┬───────┬────────┬─────────┬─────────────┬────────────────┬─────┬──────────╮
+│ Proxy                  ┆ Proto ┆ Status ┆ Latency ┆ Anonymity   ┆ Exit IP        ┆ Geo ┆ Detail   │
+╞════════════════════════╪═══════╪════════╪═════════╪═════════════╪════════════════╪═════╪══════════╡
+│ socks5://1.2.3.4:1080  ┆ socks5┆ alive  ┆  142 ms ┆ elite       ┆ 203.0.113.9    ┆ -   ┆ HTTP 200 │
+╰────────────────────────┴───────┴────────┴─────────┴─────────────┴────────────────┴─────┴──────────╯
 
 checked 1 proxies in 142 ms
 alive 1 (100.0%) · dead 0 (0.0%)
@@ -191,6 +191,10 @@ JSON output is an array of objects:
     "status_code": 200,
     "anonymity": "elite",
     "exit_ip": "203.0.113.9",
+    "country": null,
+    "country_code": null,
+    "asn": null,
+    "as_org": null,
     "error": null
   }
 ]
@@ -315,8 +319,11 @@ level `unknown`. Disable the extra lookup with `--no-anonymity`.
 
 ```
 src/
+├── lib.rs        # library crate root re-exporting core modules
+├── cli.rs        # clap CLI definitions, flags and subcommands
 ├── proxy.rs      # endpoint parsing and redaction
 ├── transport.rs  # HTTP/1.1 client: CONNECT, SOCKS4a, SOCKS5, TLS
+├── report.rs     # per-proxy CheckResult types
 ├── checker.rs    # worker pool, retries, latency, protocol detection
 ├── anonymity.rs  # judge payload analysis
 ├── geo.rs        # offline GeoIP lookups
